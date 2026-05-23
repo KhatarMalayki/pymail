@@ -1,0 +1,14 @@
+name = "pymail-license"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# Bind the R2 bucket so the Worker can read/write users.json
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "pymail-releases"
+
+# Environment variables (non-secret). The Ed25519 private key is
+# uploaded separately as a secret with `wrangler secret put`.
+[vars]
+TRIAL_DAYS_DEFAULT = "30"
+ADMIN_EMAILS = "khatar@intra.tunasgroup.com,khatarmalayki21@gmail.com"

@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.spec
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+
+# Environment / config (may contain secrets or local paths)
+.env
+
+# CRITICAL: license signing private key — NEVER commit
+.keys/
+*.key
+*.pem
+
+# License issuance log (may contain user emails / personal info)
+admin/licenses_issued.json
+
+# Smoke / debug helpers (often have admin tokens hardcoded)
+smoke_*.py
+test_*.py
+
+# Worker development artifacts
+worker/node_modules/
+worker/.wrangler/
+worker/.dev.vars
+.wrangler/
+
+# IDE / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local state files
+*.db
+*.db-journal
+*.db-shm
+*.db-wal

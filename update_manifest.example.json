@@ -1,0 +1,6 @@
+{
+  "version": "1.0.1",
+  "url": "https://example.com/downloads/PyMail-1.0.1.exe",
+  "notes": "- Fixed SMTP error reporting\n- Added auto-update\n- Better Carbonio support",
+  "mandatory": false
+}

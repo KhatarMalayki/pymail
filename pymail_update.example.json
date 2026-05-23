@@ -1,0 +1,4 @@
+{
+  "_comment": "Place this file (renamed to pymail_update.json) next to PyMail.exe to override the default manifest URL without rebuilding the app. Useful for internal deployments.",
+  "manifest_url": "https://intranet.tunasgroup.com/pymail/update_manifest.json"
+}

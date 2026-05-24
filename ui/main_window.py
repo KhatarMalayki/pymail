@@ -165,7 +165,7 @@ class MainWindow(QMainWindow):
         ("outbox", "Outbox", "📮"),
         ("sent", "Sent", "📤"),
         ("drafts", "Drafts", "📝"),
-        ("spam", "Spam", "🚫"),
+        ("spam", "Junk", "🚫"),
         ("trash", "Trash", "🗑"),
     ]
 
@@ -674,13 +674,13 @@ class MainWindow(QMainWindow):
         menu.addAction("Mark as unread", lambda: self._mark_read(email_id, False))
         menu.addSeparator()
         if self.current_folder == "spam":
-            menu.addAction("Not spam (move to Inbox)",
+            menu.addAction("Not junk (move to Inbox)",
                            lambda: self._mark_not_spam(email_id))
         elif self.current_folder == "trash":
             menu.addAction("Delete permanently",
                            lambda: self._delete_email(email_id))
         else:
-            menu.addAction("Move to Spam 🚫",
+            menu.addAction("Move to Junk 🚫",
                            lambda: self._mark_spam(email_id))
             menu.addAction("Move to Trash",
                            lambda: self._trash_email(email_id))
@@ -693,7 +693,7 @@ class MainWindow(QMainWindow):
         database.move_to_spam(email_id)
         self._refresh_email_list()
         self._update_folder_counts()
-        self.status_label.setText("Moved to Spam (server folder is not affected — POP3 limitation)")
+        self.status_label.setText("Moved to Junk (server folder is not affected — POP3 limitation)")
 
     def _mark_not_spam(self, email_id):
         database.move_to_inbox(email_id)

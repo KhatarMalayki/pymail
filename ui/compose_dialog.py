@@ -48,6 +48,10 @@ class ComposeDialog(QDialog):
         self._outbox_id = None
         self._dirty = False
         self._sent = False  # if True, dialog closing should NOT save as draft
+        # Pristine signature HTML stashed at insert-time. Used at send time
+        # to splice the signature back in unmodified, bypassing Qt's lossy
+        # toHtml() serialisation (which destroys complex table layouts).
+        self._raw_signature_html = None
         self._build_ui()
         self._load_accounts(account_id)
         if prefill:
@@ -492,6 +496,11 @@ class ComposeDialog(QDialog):
         user types. Without this fix, typing in a fresh compose would
         come out in the signature's color (the user reported text turning
         blue and needing two enters).
+
+        We also plant invisible plain-text markers around the signature
+        so that at send time we can swap Qt's lossy roundtrip back to the
+        original pristine signature HTML — preserving table layout, fonts,
+        colors that Qt's QTextDocument otherwise mangles when serialised.
         """
         sig = self._signature_for_current()
         if not sig:
@@ -505,6 +514,9 @@ class ComposeDialog(QDialog):
 
         from PyQt5.QtGui import QTextCharFormat, QTextBlockFormat, QFont
 
+        # Remember the original signature so we can restore it at send time.
+        self._raw_signature_html = sig if self._is_html(sig) else None
+
         cursor = self.body_edit.textCursor()
         cursor.movePosition(cursor.End)
 
@@ -513,7 +525,12 @@ class ComposeDialog(QDialog):
         # why the user had to press Enter twice to "escape" the formatting.)
         if self._is_html(sig):
             cursor.insertBlock()
+            # Open marker — survives Qt's toHtml() roundtrip as plain text
+            cursor.insertText(self.SIG_MARKER_OPEN)
+            cursor.insertBlock()
             cursor.insertHtml(sig)
+            cursor.insertBlock()
+            cursor.insertText(self.SIG_MARKER_CLOSE)
         else:
             cursor.insertText("\n-- \n" + sig + "\n")
 
@@ -533,6 +550,11 @@ class ComposeDialog(QDialog):
         self.body_edit.setTextCursor(cursor)
         self.body_edit.setCurrentCharFormat(default_char)
 
+        # Hide the markers visually so the user doesn't see the literal text.
+        # We do this with a 1pt transparent style applied to the runs that
+        # contain the marker text. Plain text still survives toHtml().
+        self._hide_marker_runs()
+
     def _prepend_signature_for_reply(self):
         """Insert signature at the TOP of the body, before the quoted
         block. This is what Outlook does for replies/forwards — user
@@ -548,13 +570,19 @@ class ComposeDialog(QDialog):
 
         from PyQt5.QtGui import QTextCharFormat, QTextBlockFormat, QFont
 
+        self._raw_signature_html = sig if self._is_html(sig) else None
+
         cursor = self.body_edit.textCursor()
         cursor.movePosition(cursor.Start)
 
-        # One empty line at top, then signature, then a separator line.
+        # One empty line at top, then signature with markers, then a separator.
         if self._is_html(sig):
             cursor.insertBlock()
+            cursor.insertText(self.SIG_MARKER_OPEN)
+            cursor.insertBlock()
             cursor.insertHtml(sig)
+            cursor.insertBlock()
+            cursor.insertText(self.SIG_MARKER_CLOSE)
             cursor.insertBlock()
         else:
             cursor.insertText("\n-- \n" + sig + "\n\n")
@@ -573,6 +601,81 @@ class ComposeDialog(QDialog):
 
         self.body_edit.setTextCursor(cursor)
         self.body_edit.setCurrentCharFormat(default_char)
+
+        self._hide_marker_runs()
+
+    # Plain-text markers we plant around the signature so we can splice
+    # the original (pristine) signature HTML back in at send time.
+    SIG_MARKER_OPEN = "\u2063PMSIG_OPEN\u2063"   # invisible separator wrapped
+    SIG_MARKER_CLOSE = "\u2063PMSIG_CLOSE\u2063"
+
+    def _hide_marker_runs(self):
+        """Find the marker text in the document and apply a tiny / invisible
+        format so the user doesn't see the literal token. The markers stay
+        in the underlying document so toPlainText() and toHtml() can still
+        find them."""
+        from PyQt5.QtGui import QTextCharFormat, QColor
+        doc = self.body_edit.document()
+        for marker in (self.SIG_MARKER_OPEN, self.SIG_MARKER_CLOSE):
+            cur = doc.find(marker)
+            while cur is not None and not cur.isNull():
+                fmt = QTextCharFormat()
+                # 1pt + transparent foreground = effectively invisible
+                fmt.setFontPointSize(1)
+                fmt.setForeground(QColor(255, 255, 255, 0))
+                cur.mergeCharFormat(fmt)
+                cur = doc.find(marker, cur)
+
+    def _splice_pristine_signature(self, body_html: str) -> str:
+        """Replace the signature region in Qt-serialized HTML with the
+        ORIGINAL signature HTML we stashed at insert time. Returns the
+        cleaned-up HTML ready for SMTP.
+
+        The "signature region" is the text between SIG_MARKER_OPEN and
+        SIG_MARKER_CLOSE, including any surrounding paragraph wrappers
+        Qt may have inserted around the markers."""
+        import re
+        if not self._raw_signature_html:
+            # No pristine sig stashed — just remove the markers in case they
+            # leaked in via a re-opened draft.
+            return self._strip_markers(body_html)
+
+        open_tok = self.SIG_MARKER_OPEN
+        close_tok = self.SIG_MARKER_CLOSE
+        if open_tok not in body_html or close_tok not in body_html:
+            return self._strip_markers(body_html)
+
+        # Greedy: from the first <p ...> wrapping OPEN to the closing
+        # </p> after CLOSE — replace the whole block with raw signature.
+        # Build a regex that finds: optional <p ...>?...OPEN...CLOSE...</p>?
+        # We anchor on the markers themselves; surrounding tags are
+        # captured if present.
+        pattern = re.compile(
+            r'(<p[^>]*>\s*)?'                  # optional opening <p>
+            + re.escape(open_tok)
+            + r'.*?'                            # everything in between
+            + re.escape(close_tok)
+            + r'(\s*</p>)?',                   # optional closing </p>
+            re.DOTALL | re.IGNORECASE,
+        )
+        replacement = (
+            '<div class="pymail-signature">'
+            + self._raw_signature_html
+            + '</div>'
+        )
+        new_html, n = pattern.subn(replacement, body_html, count=1)
+        if n == 0:
+            # Fallback: just strip markers, leave Qt's lossy render.
+            return self._strip_markers(body_html)
+        # Final cleanup — make sure no orphan markers remain
+        return self._strip_markers(new_html)
+
+    def _strip_markers(self, html: str) -> str:
+        return (
+            html
+            .replace(self.SIG_MARKER_OPEN, "")
+            .replace(self.SIG_MARKER_CLOSE, "")
+        )
 
     @staticmethod
     def _sig_plain_excerpt(sig: str) -> str:
@@ -777,6 +880,19 @@ class ComposeDialog(QDialog):
         # with HTML alternative so recipients see the formatting.
         if self._body_has_rich_content():
             body_html = self.body_edit.toHtml()
+            # Splice the pristine signature HTML back in. Qt's toHtml()
+            # roundtrips QTextDocument's internal model — for table-based
+            # signatures this loses the table structure entirely. We
+            # planted plain-text markers around the signature when it was
+            # first inserted; here we replace everything between the
+            # markers with the original signature HTML.
+            body_html = self._splice_pristine_signature(body_html)
+            # Also strip the markers from the plain-text alternative.
+            body_plain = (
+                body_plain
+                .replace(self.SIG_MARKER_OPEN, "")
+                .replace(self.SIG_MARKER_CLOSE, "")
+            )
         from_addr = f'{account["name"]} <{account["email"]}>' if account.get("name") else account["email"]
 
         msg = smtp_client.build_message(

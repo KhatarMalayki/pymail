@@ -777,6 +777,35 @@ class MainWindow(QMainWindow):
         self._update_folder_counts()
         self.status_label.setText("Moved to Junk (server folder is not affected — POP3 limitation)")
 
+    def _server_delete_if_imap(self, email_ids: list[int], reason: str = ""):
+        """If the given local emails came from IMAP (Junk folder), also
+        delete them on the server. POP3-origin emails are silently skipped.
+        Best-effort: errors are logged to the status bar but don't block
+        local deletion."""
+        if not email_ids:
+            return
+        # Group by account so we can do a single IMAP session per account
+        from collections import defaultdict
+        per_account = defaultdict(list)
+        for eid in email_ids:
+            row = database.get_email(eid)
+            if not row:
+                continue
+            uidl = row.get("uidl") or ""
+            if not uidl.startswith(imap_client.IMAP_UID_PREFIX):
+                continue  # POP3 origin — server delete impossible
+            per_account[row["account_id"]].append(uidl)
+        for acc_id, uidls in per_account.items():
+            acc = database.get_account(acc_id)
+            if not acc or not acc.get("imap_enabled"):
+                continue
+            try:
+                n = imap_client.purge_junk_on_server(acc, uidls)
+                if n and reason:
+                    self.status_label.setText(f"{reason} ({n} also deleted on server)")
+            except Exception as e:
+                self.status_label.setText(f"Server delete failed: {e}")
+
     def _maybe_refresh_junk(self, account_id: int):
         """Trigger a background IMAP Junk fetch if the account has IMAP
         enabled. No-ops otherwise. Errors are silent — IMAP is best-effort."""
@@ -797,6 +826,9 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"Fetched {new_count} new junk message(s) from server.")
 
     def _mark_not_spam(self, email_id):
+        # If from IMAP Junk: also remove from server's Junk folder.
+        # The local copy stays in our Inbox so user can still see it.
+        self._server_delete_if_imap([email_id], reason="Moved to Inbox")
         database.move_to_inbox(email_id)
         self._refresh_email_list()
         self._update_folder_counts()
@@ -807,12 +839,16 @@ class MainWindow(QMainWindow):
         self._update_folder_counts()
 
     def _trash_email(self, email_id):
+        # If email came from IMAP Junk, move-to-trash is effectively a server
+        # delete (the server has no local "Trash"; we treat trash as gone).
+        self._server_delete_if_imap([email_id], reason="Moved to Trash")
         database.move_to_trash(email_id)
         self._refresh_email_list()
         self._update_folder_counts()
 
     def _delete_email(self, email_id):
         if QMessageBox.question(self, "Delete", "Permanently delete this email?") == QMessageBox.Yes:
+            self._server_delete_if_imap([email_id], reason="Permanently deleted")
             database.delete_email(email_id)
             self._refresh_email_list()
             self._update_folder_counts()

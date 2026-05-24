@@ -14,6 +14,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QIcon
 
 from core import database, pop3_client, smtp_client, updater
+from core import imap_client
 from core import license as licmod
 from core.version import __version__
 from .account_dialog import AccountDialog
@@ -153,7 +154,36 @@ class FetchWorker(QThread):
                 progress_cb=lambda i, t: self.progress.emit(i, t),
                 log_cb=lambda m: self.log.emit(m),
             )
+            # Hybrid: also fetch server-side Junk via IMAP (read-only).
+            # Failures here don't break the POP3 sync — Junk is best-effort.
+            if self.account.get("imap_enabled") and self.account.get("imap_host"):
+                try:
+                    junk_count = imap_client.fetch_junk(
+                        self.account,
+                        progress_cb=lambda i, t: self.progress.emit(i, t),
+                        log_cb=lambda m: self.log.emit(m),
+                    )
+                    new_count += junk_count
+                except Exception as e:
+                    self.log.emit(f"[IMAP Junk] Skipped: {e}")
             self.done.emit(self.account["id"], new_count, "")
+        except Exception as e:
+            self.done.emit(self.account["id"], 0, str(e))
+
+
+class JunkFetchWorker(QThread):
+    """Background-only IMAP Junk fetch, used when the user opens the
+    Junk folder so they see fresh server-side Junk without a full sync."""
+    done = pyqtSignal(int, int, str)  # account_id, new_count, error_or_empty
+
+    def __init__(self, account):
+        super().__init__()
+        self.account = account
+
+    def run(self):
+        try:
+            n = imap_client.fetch_junk(self.account)
+            self.done.emit(self.account["id"], n, "")
         except Exception as e:
             self.done.emit(self.account["id"], 0, str(e))
 
@@ -486,6 +516,10 @@ class MainWindow(QMainWindow):
             self.current_account_id = acc_id
             self.current_folder = folder
             self._refresh_email_list()
+            # If user opened Junk and IMAP is enabled, refresh server-side
+            # junk in the background so they see fresh entries.
+            if folder == "spam":
+                self._maybe_refresh_junk(acc_id)
 
     def _tree_menu(self, pos):
         item = self.tree.itemAt(pos)
@@ -694,6 +728,25 @@ class MainWindow(QMainWindow):
         self._refresh_email_list()
         self._update_folder_counts()
         self.status_label.setText("Moved to Junk (server folder is not affected — POP3 limitation)")
+
+    def _maybe_refresh_junk(self, account_id: int):
+        """Trigger a background IMAP Junk fetch if the account has IMAP
+        enabled. No-ops otherwise. Errors are silent — IMAP is best-effort."""
+        acc = database.get_account(account_id)
+        if not acc or not acc.get("imap_enabled") or not acc.get("imap_host"):
+            return
+        worker = JunkFetchWorker(acc)
+        worker.done.connect(self._on_junk_refreshed)
+        self.workers.append(worker)
+        worker.start()
+
+    def _on_junk_refreshed(self, account_id: int, new_count: int, err: str):
+        if err:
+            return
+        if new_count > 0 and self.current_folder == "spam" and self.current_account_id == account_id:
+            self._refresh_email_list()
+            self._update_folder_counts()
+            self.status_label.setText(f"Fetched {new_count} new junk message(s) from server.")
 
     def _mark_not_spam(self, email_id):
         database.move_to_inbox(email_id)

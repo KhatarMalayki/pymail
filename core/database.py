@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS accounts (
     smtp_user       TEXT,
     smtp_password   TEXT,
     signature       TEXT DEFAULT '',
+    imap_host       TEXT,
+    imap_port       INTEGER DEFAULT 993,
+    imap_ssl        INTEGER DEFAULT 1,
+    junk_folder_name TEXT,
+    imap_enabled    INTEGER DEFAULT 0,
     created_at      TEXT
 );
 
@@ -142,6 +147,18 @@ def _migrate(conn):
     cols = {row[1] for row in cur.fetchall()}
     if "signature" not in cols:
         conn.execute("ALTER TABLE accounts ADD COLUMN signature TEXT DEFAULT ''")
+
+    # IMAP support for Junk folder fetch (POP3 only sees Inbox)
+    if "imap_host" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN imap_host TEXT")
+    if "imap_port" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN imap_port INTEGER DEFAULT 993")
+    if "imap_ssl" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN imap_ssl INTEGER DEFAULT 1")
+    if "junk_folder_name" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN junk_folder_name TEXT")
+    if "imap_enabled" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN imap_enabled INTEGER DEFAULT 0")
 
     # attachments.file_hash (legacy DBs only had `data` BLOB)
     cur = conn.execute("PRAGMA table_info(attachments)")
@@ -311,6 +328,7 @@ def add_account(data: dict) -> int:
         "leave_on_server",
         "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_password",
         "signature",
+        "imap_host", "imap_port", "imap_ssl", "junk_folder_name", "imap_enabled",
         "created_at",
     ]
     data = {**data, "created_at": datetime.utcnow().isoformat()}
@@ -332,6 +350,7 @@ def update_account(account_id: int, data: dict):
         "leave_on_server",
         "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_password",
         "signature",
+        "imap_host", "imap_port", "imap_ssl", "junk_folder_name", "imap_enabled",
     ]
     sets = ",".join([f"{c}=?" for c in cols])
     values = [data.get(c) for c in cols] + [account_id]

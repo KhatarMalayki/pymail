@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QTextCharFormat, QFont
 from core import database, pop3_client, smtp_client
+from core import imap_client
 
 
 class AccountDialog(QDialog):
@@ -109,6 +110,58 @@ class AccountDialog(QDialog):
         sform.addRow("Password:", self.smtp_pass)
         sform.addRow("", self.smtp_test_btn)
         tabs.addTab(smtp_tab, "Outgoing (SMTP)")
+
+        # IMAP tab — only used to fetch the Junk folder from the server,
+        # because POP3 cannot list folders. Read-only on the server.
+        imap_tab = QWidget()
+        iform = QFormLayout(imap_tab)
+        imap_intro = QLabel(
+            "POP3 only delivers your <b>Inbox</b>. To also see emails the "
+            "server flagged as <b>Junk/Spam</b>, enable IMAP read-only "
+            "access here. RunLab Mail will <b>never delete or modify</b> "
+            "anything on the server via IMAP — it only reads the Junk "
+            "folder so you can review false positives."
+        )
+        imap_intro.setTextFormat(Qt.RichText)
+        imap_intro.setStyleSheet("color:#605e5c;")
+        imap_intro.setWordWrap(True)
+        iform.addRow(imap_intro)
+
+        self.imap_enabled = QCheckBox("Fetch server-side Junk folder via IMAP (read-only)")
+        self.imap_enabled.toggled.connect(self._on_imap_toggled)
+        iform.addRow("", self.imap_enabled)
+
+        self.imap_host = QLineEdit()
+        self.imap_host.setPlaceholderText("e.g. mailbox.tunasgroup.com (often same as POP3)")
+        self.imap_port = QSpinBox()
+        self.imap_port.setRange(1, 65535)
+        self.imap_port.setValue(993)
+        self.imap_ssl = QCheckBox("Use SSL/TLS")
+        self.imap_ssl.setChecked(True)
+        self.junk_folder = QLineEdit()
+        self.junk_folder.setPlaceholderText("(auto-detect on first sync)")
+        self.junk_folder.setToolTip(
+            "Leave blank to auto-detect (tries Junk, Spam, INBOX/Junk, etc.). "
+            "Or specify exactly, e.g. 'Junk' or 'INBOX/Junk'."
+        )
+
+        self.imap_copy_pop_btn = QPushButton("Copy from POP3")
+        self.imap_copy_pop_btn.setToolTip("Use the same host as POP3 (most servers accept both).")
+        self.imap_copy_pop_btn.clicked.connect(self._copy_pop_to_imap)
+
+        self.imap_test_btn = QPushButton("Test IMAP && detect Junk folder")
+        self.imap_test_btn.clicked.connect(self._test_imap)
+
+        iform.addRow("Server:", self.imap_host)
+        iform.addRow("Port:", self.imap_port)
+        iform.addRow("", self.imap_ssl)
+        iform.addRow("Junk folder:", self.junk_folder)
+        iform.addRow("", self.imap_copy_pop_btn)
+        iform.addRow("", self.imap_test_btn)
+        tabs.addTab(imap_tab, "Junk via IMAP")
+
+        # Initial state: disabled until checkbox ticked
+        self._on_imap_toggled(False)
 
         # Signature tab
         sig_tab = QWidget()
@@ -267,6 +320,13 @@ class AccountDialog(QDialog):
         )
         if same:
             self.same_as_pop.setChecked(True)
+        # IMAP fields
+        self.imap_enabled.setChecked(bool(a.get("imap_enabled")))
+        self.imap_host.setText(a.get("imap_host") or "")
+        self.imap_port.setValue(int(a.get("imap_port") or 993))
+        self.imap_ssl.setChecked(bool(a.get("imap_ssl") if a.get("imap_ssl") is not None else 1))
+        self.junk_folder.setText(a.get("junk_folder_name") or "")
+        self._on_imap_toggled(self.imap_enabled.isChecked())
 
     def _collect(self) -> dict:
         email = self.email_edit.text().strip()
@@ -292,6 +352,11 @@ class AccountDialog(QDialog):
             "smtp_user": self.smtp_user.text().strip() or email,
             "smtp_password": self.smtp_pass.text(),
             "signature": signature,
+            "imap_enabled": 1 if self.imap_enabled.isChecked() else 0,
+            "imap_host": self.imap_host.text().strip(),
+            "imap_port": self.imap_port.value(),
+            "imap_ssl": 1 if self.imap_ssl.isChecked() else 0,
+            "junk_folder_name": self.junk_folder.text().strip(),
         }
 
     @staticmethod
@@ -432,6 +497,44 @@ class AccountDialog(QDialog):
             QMessageBox.information(self, "SMTP Test", msg)
         else:
             QMessageBox.critical(self, "SMTP Test failed", msg)
+
+    # ---- IMAP (Junk fetch) ----
+    def _on_imap_toggled(self, checked: bool):
+        for w in (self.imap_host, self.imap_port, self.imap_ssl,
+                  self.junk_folder, self.imap_copy_pop_btn, self.imap_test_btn):
+            w.setEnabled(checked)
+
+    def _copy_pop_to_imap(self):
+        host = self.pop_host.text().strip()
+        if host:
+            self.imap_host.setText(host)
+        self.imap_ssl.setChecked(self.pop_ssl.isChecked())
+        self.imap_port.setValue(993 if self.imap_ssl.isChecked() else 143)
+
+    def _test_imap(self):
+        if not self._validate():
+            return
+        d = self._collect()
+        if not d.get("imap_host"):
+            QMessageBox.warning(self, "Missing host",
+                                "Please enter an IMAP host or click 'Copy from POP3'.")
+            return
+        self.setCursor(Qt.WaitCursor)
+        ok, msg = imap_client.test_connection(d)
+        self.unsetCursor()
+        if ok:
+            # Auto-fill detected folder name if user left it blank
+            if not self.junk_folder.text().strip():
+                detected = None
+                try:
+                    detected = imap_client.detect_junk_folder(d)
+                except Exception:
+                    pass
+                if detected:
+                    self.junk_folder.setText(detected)
+            QMessageBox.information(self, "IMAP Test", msg)
+        else:
+            QMessageBox.critical(self, "IMAP Test failed", msg)
 
     def _save(self):
         if not self._validate():

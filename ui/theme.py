@@ -202,6 +202,53 @@ QComboBox::down-arrow {
     margin-right: 6px;
 }
 
+/* QSpinBox arrows: clean Outlook-style, replaces ugly default black squares */
+QSpinBox {
+    padding-right: 22px;  /* room for buttons */
+}
+QSpinBox::up-button, QSpinBox::down-button {
+    subcontrol-origin: border;
+    background: transparent;
+    border: none;
+    width: 18px;
+    margin: 1px;
+    border-radius: 2px;
+}
+QSpinBox::up-button {
+    subcontrol-position: top right;
+}
+QSpinBox::down-button {
+    subcontrol-position: bottom right;
+}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+    background: #e1dfdd;
+}
+QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {
+    background: #c8c6c4;
+}
+QSpinBox::up-arrow {
+    image: none;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 5px solid #605e5c;
+}
+QSpinBox::down-arrow {
+    image: none;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #605e5c;
+}
+QSpinBox::up-arrow:disabled, QSpinBox::up-arrow:off {
+    border-bottom-color: #c8c6c4;
+}
+QSpinBox::down-arrow:disabled, QSpinBox::down-arrow:off {
+    border-top-color: #c8c6c4;
+}
+
 /* ---------- Buttons ---------- */
 QPushButton {
     background-color: #ffffff;

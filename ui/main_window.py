@@ -142,9 +142,10 @@ class WorkerVerifyWorker(QThread):
 def _purge_old_junk(account: dict, log_cb=None) -> int:
     """Auto-delete junk older than `junk_purge_days` for the given account.
 
-    Always purges locally. If `junk_purge_server` is also set AND IMAP is
-    enabled, also EXPUNGEs from the server. POP3-origin junk is local-only
-    no matter what (POP3 has no folder semantics)."""
+    If IMAP is enabled, the deletion is mirrored to the server too
+    (standard IMAP semantics — "delete here means delete everywhere").
+    POP3-origin junk is local-only no matter what (POP3 has no folder
+    semantics, so we can't tell the server which message to delete)."""
     import datetime as _dt
     days = int(account.get("junk_purge_days") or 0)
     if days <= 0:
@@ -155,8 +156,9 @@ def _purge_old_junk(account: dict, log_cb=None) -> int:
         database.set_junk_purge_last_run(account["id"], _dt.datetime.utcnow().isoformat())
         return 0
 
-    # Server-side delete first (so if we crash, local cleanup retries next time)
-    if account.get("junk_purge_server") and account.get("imap_enabled"):
+    # Server-side delete first (so if we crash, local cleanup retries next time).
+    # This is implicit when IMAP is on — same as Outlook, Thunderbird, etc.
+    if account.get("imap_enabled"):
         try:
             uidls = [r["uidl"] for r in rows if r.get("uidl")]
             imap_client.purge_junk_on_server(account, uidls, log_cb=log_cb)

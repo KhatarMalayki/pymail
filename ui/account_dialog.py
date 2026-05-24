@@ -112,22 +112,27 @@ class AccountDialog(QDialog):
         tabs.addTab(smtp_tab, "Outgoing (SMTP)")
 
         # IMAP tab — only used to fetch the Junk folder from the server,
-        # because POP3 cannot list folders. Read-only on the server.
+        # because POP3 cannot list folders. When IMAP is enabled and a
+        # purge threshold is set, deletions are mirrored to the server
+        # automatically (standard IMAP behavior).
         imap_tab = QWidget()
         iform = QFormLayout(imap_tab)
+        iform.setLabelAlignment(Qt.AlignRight)
+        iform.setHorizontalSpacing(14)
+        iform.setVerticalSpacing(8)
+
         imap_intro = QLabel(
             "POP3 only delivers your <b>Inbox</b>. To also see emails the "
-            "server flagged as <b>Junk/Spam</b>, enable IMAP read-only "
-            "access here. RunLab Mail will <b>never delete or modify</b> "
-            "anything on the server via IMAP — it only reads the Junk "
-            "folder so you can review false positives."
+            "server flagged as <b>Junk/Spam</b>, enable IMAP here. Reading "
+            "is non-destructive; deletions only happen if you set the "
+            "auto-purge threshold below."
         )
         imap_intro.setTextFormat(Qt.RichText)
-        imap_intro.setStyleSheet("color:#605e5c;")
+        imap_intro.setStyleSheet("color:#605e5c; padding:0 0 6px 0;")
         imap_intro.setWordWrap(True)
         iform.addRow(imap_intro)
 
-        self.imap_enabled = QCheckBox("Fetch server-side Junk folder via IMAP (read-only)")
+        self.imap_enabled = QCheckBox("Fetch server-side Junk folder via IMAP")
         self.imap_enabled.toggled.connect(self._on_imap_toggled)
         iform.addRow("", self.imap_enabled)
 
@@ -156,16 +161,28 @@ class AccountDialog(QDialog):
         iform.addRow("Port:", self.imap_port)
         iform.addRow("", self.imap_ssl)
         iform.addRow("Junk folder:", self.junk_folder)
-        iform.addRow("", self.imap_copy_pop_btn)
-        iform.addRow("", self.imap_test_btn)
+
+        # Side-by-side action buttons (compact)
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(8)
+        btn_row.addWidget(self.imap_copy_pop_btn)
+        btn_row.addWidget(self.imap_test_btn, 1)
+        btn_wrap = QWidget()
+        btn_wrap.setLayout(btn_row)
+        iform.addRow("", btn_wrap)
 
         # ---- Auto-purge ----
         purge_label = QLabel(
-            "<hr><b>Auto-purge old Junk</b><br>"
-            "<i style='color:#605e5c;'>"
-            "Periodically delete junk older than the threshold. "
-            "Set to 0 to disable. Runs as part of every Send/Receive."
-            "</i>"
+            '<div style="margin-top:14px; padding-top:10px; '
+            'border-top:1px solid #edebe9;">'
+            '<b style="color:#201f1e;">Auto-purge old Junk</b><br>'
+            '<span style="color:#605e5c;">'
+            "Periodically delete Junk older than the threshold. "
+            "Runs as part of every Send/Receive. "
+            "Deletions also remove the message from the server "
+            "(standard IMAP behavior)."
+            "</span></div>"
         )
         purge_label.setTextFormat(Qt.RichText)
         purge_label.setWordWrap(True)
@@ -177,21 +194,17 @@ class AccountDialog(QDialog):
         self.junk_purge_days.setSpecialValueText("Disabled")
         self.junk_purge_days.setValue(0)
         self.junk_purge_days.setToolTip(
-            "0 = never auto-purge. 30 = delete junk older than 30 days. "
+            "0 = never auto-purge.\n"
+            "30 = delete junk older than 30 days.\n"
             "Recommended: 30–90 days."
         )
-        iform.addRow("Delete junk older than:", self.junk_purge_days)
+        # Hidden but kept for backward compatibility — when purge is enabled
+        # and IMAP is active, server delete is implicit (standard IMAP).
+        self.junk_purge_server = QCheckBox()
+        self.junk_purge_server.setVisible(False)
+        self.junk_purge_server.setChecked(True)
 
-        self.junk_purge_server = QCheckBox(
-            "Also delete on server (uses IMAP EXPUNGE — destructive)"
-        )
-        self.junk_purge_server.setToolTip(
-            "ON: PyMail issues IMAP STORE +FLAGS \\Deleted then EXPUNGE for "
-            "junk older than the threshold. The Junk folder on the Carbonio "
-            "server stays clean.\n\n"
-            "OFF: PyMail only deletes the local copy. Server keeps everything."
-        )
-        iform.addRow("", self.junk_purge_server)
+        iform.addRow("Delete junk older than:", self.junk_purge_days)
 
         tabs.addTab(imap_tab, "Junk via IMAP")
 
@@ -541,7 +554,7 @@ class AccountDialog(QDialog):
     def _on_imap_toggled(self, checked: bool):
         for w in (self.imap_host, self.imap_port, self.imap_ssl,
                   self.junk_folder, self.imap_copy_pop_btn, self.imap_test_btn,
-                  self.junk_purge_days, self.junk_purge_server):
+                  self.junk_purge_days):
             w.setEnabled(checked)
 
     def _copy_pop_to_imap(self):

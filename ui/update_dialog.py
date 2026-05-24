@@ -38,7 +38,7 @@ class UpdateDialog(QDialog):
         super().__init__(parent)
         self.manifest = manifest
         self.worker = None
-        self.setWindowTitle("PyMail Update")
+        self.setWindowTitle("RunLab Mail Update")
         self.resize(520, 380)
         self._build_ui()
 
@@ -46,7 +46,7 @@ class UpdateDialog(QDialog):
         layout = QVBoxLayout(self)
 
         title = QLabel(
-            f"<h3>A new version of PyMail is available</h3>"
+            f"<h3>A new version of RunLab Mail is available</h3>"
             f"<p>Current: <b>{__version__}</b><br>"
             f"Latest: <b>{self.manifest.get('version', '?')}</b></p>"
         )

@@ -1,5 +1,5 @@
 """
-PyMail - Desktop Email Client
+RunLab Mail - Desktop Email Client
 Entry point.
 """
 import sys
@@ -18,8 +18,8 @@ def main():
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("PyMail")
-    app.setOrganizationName("PyMail")
+    app.setApplicationName("RunLab Mail")
+    app.setOrganizationName("RunLab")
     app.setStyle("Fusion")
     app.setQuitOnLastWindowClosed(True)
 
@@ -50,7 +50,7 @@ def main():
         QMessageBox.critical(
             None, "License invalid",
             f"{err}\n\n"
-            f"Your PyMail license is no longer valid. Please contact your "
+            f"Your RunLab Mail license is no longer valid. Please contact your "
             f"administrator to extend or reactivate it.",
         )
         instance.release()
@@ -72,24 +72,24 @@ def ensure_safe_install_location(app: QApplication) -> bool:
     target = install_location.safe_install_path()
     if target.is_file() and target.resolve() != current_exe.resolve():
         QMessageBox.information(
-            None, "PyMail",
-            f"You launched PyMail from a cloud-synced folder ({hint}).\n\n"
-            f"PyMail is already installed at:\n  {target}\n\n"
+            None, "RunLab Mail",
+            f"You launched RunLab Mail from a cloud-synced folder ({hint}).\n\n"
+            f"RunLab Mail is already installed at:\n  {target}\n\n"
             f"Please use that one instead. This launcher will exit.",
         )
         sys.exit(0)
     ret = QMessageBox.question(
-        None, "Relocate PyMail",
-        f"PyMail is currently running from a cloud-synced folder ({hint}).\n\n"
+        None, "Relocate RunLab Mail",
+        f"RunLab Mail is currently running from a cloud-synced folder ({hint}).\n\n"
         f"This breaks auto-updates because the sync agent locks the file.\n\n"
-        f"Move PyMail to:\n  {target}\n\n"
+        f"Move RunLab Mail to:\n  {target}\n\n"
         f"A Desktop shortcut will be created automatically.",
         QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
     )
     if ret != QMessageBox.Yes:
         return True
     shortcut = install_location.create_desktop_shortcut(target)
-    msg = f"PyMail will now move to:\n  {target}\n"
+    msg = f"RunLab Mail will now move to:\n  {target}\n"
     if shortcut:
         msg += f"\nA shortcut was created at:\n  {shortcut}"
     msg += "\n\nThe app will restart automatically."

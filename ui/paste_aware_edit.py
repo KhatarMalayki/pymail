@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import QTextEdit, QApplication
 _DEFAULT_TIMEOUT = 6  # seconds per image
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB cap per image
 _MAX_TOTAL_IMAGES = 20  # don't download more than this in one paste
-_USER_AGENT = "Mozilla/5.0 (PyMail; signature paste)"
+_USER_AGENT = "Mozilla/5.0 (RunLabMail; signature paste)"
 _DEFAULT_MAX_IMG_WIDTH = 400  # corporate logos ~300px, banners ~200px
 
 

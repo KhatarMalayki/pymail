@@ -53,7 +53,7 @@ class AboutDialog(QDialog):
         self.manifest = None
         self.check_worker = None
         self.dl_worker = None
-        self.setWindowTitle("About PyMail")
+        self.setWindowTitle("About RunLab Mail")
         self.resize(540, 480)
         self._build_ui()
         # Show last checked from prior sessions before kicking a new check
@@ -65,7 +65,7 @@ class AboutDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # App header
-        title = QLabel("<h2>PyMail</h2>")
+        title = QLabel("<h2>RunLab Mail</h2>")
         title.setTextFormat(Qt.RichText)
         layout.addWidget(title)
 
@@ -229,7 +229,7 @@ class AboutDialog(QDialog):
             f"<span style='color:#2e7d32;'>{__version__}</span> (up to date)"
         )
         self.latest_version_label.setTextFormat(Qt.RichText)
-        self.status_label.setText("Your PyMail is up to date.")
+        self.status_label.setText("Your RunLab Mail is up to date.")
         self.check_btn.setEnabled(True)
 
     def _on_check_error(self, msg: str):

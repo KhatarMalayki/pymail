@@ -15,7 +15,7 @@ from core import config
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("PyMail Settings")
+        self.setWindowTitle("RunLab Mail Settings")
         self.resize(620, 420)
         self._build_ui()
         self._load()
@@ -29,7 +29,7 @@ class SettingsDialog(QDialog):
         gb = QGroupBox("Data folder")
         form = QVBoxLayout(gb)
         info = QLabel(
-            "PyMail stores all your accounts, emails, attachments, and "
+            "RunLab Mail stores all your accounts, emails, attachments, and "
             "contacts in a single SQLite database (pymail.db). You can move "
             "it, point at a backup, or share it across PCs."
         )
@@ -133,7 +133,7 @@ class SettingsDialog(QDialog):
                 ret = QMessageBox.question(
                     self, "No pymail.db found",
                     f"There's no pymail.db in:\n  {new_dir}\n\n"
-                    f"PyMail will create a new empty database there. "
+                    f"RunLab Mail will create a new empty database there. "
                     f"Your current data will remain untouched in:\n"
                     f"  {config.get_data_dir()}\n\n"
                     f"Continue?",
@@ -145,7 +145,7 @@ class SettingsDialog(QDialog):
             else:
                 ret = QMessageBox.question(
                     self, "Use this database?",
-                    f"PyMail will switch to:\n  {target_db}\n\n"
+                    f"RunLab Mail will switch to:\n  {target_db}\n\n"
                     f"Your current data is NOT modified — it stays in:\n"
                     f"  {config.get_data_dir()}\n\n"
                     f"Continue?",
@@ -164,7 +164,7 @@ class SettingsDialog(QDialog):
         QMessageBox.information(
             self, "Restart required",
             f"Data folder changed to:\n{new_dir}\n\n"
-            f"PyMail will close now. Re-open it to use the new location.",
+            f"RunLab Mail will close now. Re-open it to use the new location.",
         )
         self.accept()
         from PyQt5.QtWidgets import QApplication

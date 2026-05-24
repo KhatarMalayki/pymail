@@ -1,5 +1,5 @@
 """
-Build PyMail.exe with PyInstaller, plus auto-generate update_manifest.json.
+Build PyMail.exe (RunLab Mail) with PyInstaller, plus auto-generate update_manifest.json.
 
 Usage:
     python build.py                              # build with placeholder URL
@@ -98,7 +98,7 @@ def main():
         "version": version,
         "url": args.url or f"https://REPLACE-ME.example.com/PyMail-{version}.exe",
         "sha256": sha,
-        "notes": args.notes or f"PyMail {version}",
+        "notes": args.notes or f"RunLab Mail {version}",
         "mandatory": args.mandatory,
     }
     manifest_path = ROOT / "dist" / "update_manifest.json"

@@ -1,5 +1,5 @@
 r"""
-Detect when PyMail.exe is running from a cloud-synced folder (OneDrive,
+Detect when RunLab Mail is running from a cloud-synced folder (OneDrive,
 Dropbox, Google Drive, iCloud) and offer to relocate to a safe local
 folder. Cloud-sync folders break auto-updates because:
 

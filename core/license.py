@@ -182,7 +182,7 @@ def fetch_blacklist(
 
     try:
         req = urllib.request.Request(
-            url, headers={"User-Agent": f"PyMail/{__version__}"}
+            url, headers={"User-Agent": f"RunLabMail/{__version__}"}
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))

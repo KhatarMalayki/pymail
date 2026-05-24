@@ -52,16 +52,16 @@ class AccountDialog(QDialog):
         self.leave_on_server = QCheckBox("Leave a copy of messages on the server")
         self.leave_on_server.setChecked(True)
         self.leave_on_server.setToolTip(
-            "Recommended ON for shared mailboxes. If OFF, PyMail will issue a "
+            "Recommended ON for shared mailboxes. If OFF, RunLab Mail will issue a "
             "DELETE command to the POP3 server after each download, removing "
             "the email from the server permanently. Use this if your mailbox "
-            "fills up and you want PyMail to be your archive."
+            "fills up and you want RunLab Mail to be your archive."
         )
         leave_hint = QLabel(
             "<i style='color:#605e5c; font-size:9pt;'>"
             "ON: emails stay on server (mailbox can fill up).<br>"
             "OFF: emails are deleted from server after download "
-            "(saves quota; PyMail becomes the only copy)."
+            "(saves quota; RunLab Mail becomes the only copy)."
             "</i>"
         )
         leave_hint.setTextFormat(Qt.RichText)

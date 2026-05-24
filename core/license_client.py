@@ -3,7 +3,7 @@ License client — talks to the Cloudflare Worker for auto-registration
 and admin operations.
 
 Public flow:
-    1. PyMail starts → if local license missing/expired, do nothing yet
+    1. RunLab Mail starts → if local license missing/expired, do nothing yet
        (user can still set up an account)
     2. After the first POP3 fetch succeeds, call register_now() which
        hits POST /register with machine_id + email. The Worker returns
@@ -85,14 +85,14 @@ def _post(path: str, body: dict, timeout: int = 10,
         raise WorkerError("Server returned non-JSON response")
 
 
-# ---------- Public API (used by the running PyMail) ----------
+# ---------- Public API (used by the running RunLab Mail) ----------
 
 def register_now(email: str, name: str = "") -> dict:
     """Register this machine + email with the license Worker.
 
     Returns the parsed response (contains license_key + expires_at).
     The signed license key is also saved to ~/.pymail/license.json so
-    PyMail picks it up automatically.
+    RunLab Mail picks it up automatically.
     """
     body = {
         "machine_id": licmod.get_machine_id(),

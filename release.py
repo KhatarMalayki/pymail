@@ -218,7 +218,7 @@ def main():
         "version": version,
         "url": download_url,
         "sha256": sha,
-        "notes": args.notes or f"PyMail {version}",
+        "notes": args.notes or f"RunLab Mail {version}",
         "mandatory": args.mandatory,
     }
     manifest_path = ROOT / "dist" / "update_manifest.json"

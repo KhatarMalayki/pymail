@@ -18,7 +18,7 @@ class LicenseActivationDialog(QDialog):
 
     def __init__(self, parent=None, error: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("PyMail - Activate License")
+        self.setWindowTitle("RunLab Mail - Activate License")
         self.setModal(True)
         self.resize(560, 420)
         self.payload = None
@@ -102,7 +102,7 @@ class LicenseActivationDialog(QDialog):
         QMessageBox.information(
             self, "Activated",
             f"License activated for {payload.get('name', 'user')}.\n"
-            f"Welcome to PyMail.",
+            f"Welcome to RunLab Mail.",
         )
         self.accept()
 

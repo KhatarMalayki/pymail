@@ -2,7 +2,7 @@
 Admin License Manager dialog — talks to the Cloudflare Worker.
 
 Lists every registered user (the Worker is the source of truth — auto-
-registration when users first run PyMail), shows status, and lets the
+registration when users first run RunLab Mail), shows status, and lets the
 admin extend / revoke / restore with a click.
 
 The admin token (set as Worker secret) is stored in core/config.py and
@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QInputDialog, QMenu, QLineEdit,
 )
 
-from core import license_client, config
+from core import license_client, config, secure_storage
 
 
 # ---------- Background workers ----------
@@ -78,13 +78,14 @@ class _SimpleWorker(QThread):
 class LicenseManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("PyMail License Manager (Admin)")
+        self.setWindowTitle("RunLab Mail License Manager (Admin)")
         self.resize(1080, 580)
         self._users: list[dict] = []
-        self._token: str = config.get("admin_token", "") or ""
+        # Migrate any plain-text token from older versions (one-time)
+        secure_storage.migrate_from_config("admin_token")
+        self._token: str = secure_storage.get_secret("admin_token", "")
         self._build_ui()
         if not self._token:
-            # Prompt for the admin token on first use, then save it
             self._prompt_for_token()
         else:
             self._load()
@@ -100,7 +101,7 @@ class LicenseManagerDialog(QDialog):
         layout.addWidget(header)
 
         info = QLabel(
-            "All PyMail installations that have auto-registered with your "
+            "All RunLab Mail installations that have auto-registered with your "
             "Cloudflare Worker. Right-click a row to extend, revoke, or restore."
         )
         info.setStyleSheet("color:#605e5c;")
@@ -167,14 +168,15 @@ class LicenseManagerDialog(QDialog):
         token, ok = QInputDialog.getText(
             self, "Admin token",
             "Paste the admin token (set as Worker secret).\n"
-            "It's stored locally so you only need to enter it once.",
+            "It's stored encrypted with your Windows credentials so only "
+            "your user account on this machine can read it.",
             QLineEdit.Password,
             self._token,
         )
         if ok and token.strip():
             self._token = token.strip()
-            config.set_value("admin_token", self._token)
-            self.status_label.setText("Token saved. Loading users...")
+            secure_storage.set_secret("admin_token", self._token)
+            self.status_label.setText("Token saved (encrypted). Loading users...")
             self._load()
         elif not self._token:
             QMessageBox.warning(

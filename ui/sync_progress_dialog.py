@@ -29,7 +29,7 @@ class SyncProgressDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("PyMail Send/Receive Progress")
+        self.setWindowTitle("RunLab Mail Send/Receive Progress")
         self.resize(680, 420)
         self.setWindowFlags(
             self.windowFlags() | Qt.WindowMinimizeButtonHint

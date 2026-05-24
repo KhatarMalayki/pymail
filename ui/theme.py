@@ -1,5 +1,5 @@
 """
-Global Qt stylesheet for PyMail. Outlook/eM Client-inspired flat modern look.
+Global Qt stylesheet for RunLab Mail. Outlook/eM Client-inspired flat modern look.
 
 Color palette:
   primary       #0078d4   (Microsoft-style blue)

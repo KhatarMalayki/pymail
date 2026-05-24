@@ -1,7 +1,12 @@
-# PyMail
+# RunLab Mail
 
 Desktop email client (POP3 + SMTP) for internal Tunas Group rollout.
 Built with Python + PyQt5, packaged as a single Windows .exe.
+
+> Codename / repo name: **PyMail**. User-facing display name: **RunLab Mail**.
+> Internal IDs (folder `~/.pymail/`, R2 bucket `pymail-releases`, Worker
+> `pymail-license`, EXE `PyMail.exe`) are kept stable so existing v1.2.x
+> installs continue to auto-update without losing data.
 
 Features include auto-update from Cloudflare R2, license management
 via Cloudflare Worker, content-addressed attachment storage, full-text
@@ -12,8 +17,8 @@ search, signature templates, and conversation threading.
 ```
 ┌──────────────────┐     ┌──────────────────────┐     ┌─────────────────┐
 │  PyMail.exe      │     │  Cloudflare Worker   │     │  Cloudflare R2  │
-│  (user laptop)   │◄───►│  pymail-license      │◄───►│  pymail-releases│
-│                  │     │                      │     │                 │
+│  (RunLab Mail)   │◄───►│  pymail-license      │◄───►│  pymail-releases│
+│  (user laptop)   │     │                      │     │                 │
 │  POP3/SMTP       │     │  /register           │     │  PyMail-X.exe   │
 │  to mail server  │     │  /verify             │     │  manifest.json  │
 │                  │     │  /admin/list,extend, │     │  revoked.json   │
@@ -21,9 +26,9 @@ search, signature templates, and conversation threading.
 └──────────────────┘     └──────────────────────┘     └─────────────────┘
 ```
 
-- **PyMail.exe**: Single-file binary, ships with embedded Ed25519 public
-  key. Stores user data at `~/.pymail/pymail.db` and attachments at
-  `~/.pymail/attachments/<sha256>.bin` (deduped).
+- **PyMail.exe** (RunLab Mail): Single-file binary, ships with embedded
+  Ed25519 public key. Stores user data at `~/.pymail/pymail.db` and
+  attachments at `~/.pymail/attachments/<sha256>.bin` (deduped).
 - **Cloudflare Worker**: License registry. Holds the Ed25519 private key
   as a Worker Secret; signs license payloads. Free tier covers 300+ users.
 - **Cloudflare R2**: Public bucket for the `.exe` releases, manifest, and
@@ -58,7 +63,7 @@ release.bat major "Big rewrite"      # 1.2.3 → 2.0.0
 
 The script bumps `core/version.py`, builds the .exe with PyInstaller,
 hashes it, generates `update_manifest.json`, and uploads both to R2.
-Existing PyMail installs auto-update on next launch.
+Existing RunLab Mail installs auto-update on next launch.
 
 ## License management
 

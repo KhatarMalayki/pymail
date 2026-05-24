@@ -1,5 +1,5 @@
 """
-Self-updater for PyMail.
+Self-updater for RunLab Mail.
 
 Workflow:
 1. On launch, check_for_updates() fetches a JSON manifest.

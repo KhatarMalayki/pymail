@@ -7,7 +7,7 @@ Usage:
     python admin/issue_license.py --name "Carol" --email carol@x.com --machine 5fa9...
 
 The output is a base64 license string. Send it to your user; they paste it
-in PyMail's license dialog at first launch.
+in RunLab Mail's license dialog at first launch.
 
 Each issued license is logged to admin/licenses_issued.json so you have
 a record of license_id -> who has it. Use this when you want to revoke.

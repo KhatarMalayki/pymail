@@ -171,7 +171,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, license_payload: dict | None = None):
         super().__init__()
-        self.setWindowTitle(f"PyMail {__version__}")
+        self.setWindowTitle(f"RunLab Mail {__version__}")
         self.resize(1280, 760)
         self.current_account_id = None
         self.current_folder = "inbox"
@@ -305,7 +305,7 @@ class MainWindow(QMainWindow):
         act_backup = QAction(
             st.standardIcon(QStyle.SP_DriveHDIcon), "Backup", self
         )
-        act_backup.setToolTip("Export or import your PyMail data file")
+        act_backup.setToolTip("Export or import your RunLab Mail data file")
         act_backup.triggered.connect(self._open_backup_menu)
         tb.addAction(act_backup)
 
@@ -419,7 +419,7 @@ class MainWindow(QMainWindow):
 
     def _first_run_prompt(self):
         ret = QMessageBox.question(
-            self, "Welcome to PyMail",
+            self, "Welcome to RunLab Mail",
             "No email account configured yet.\nWould you like to add one now?",
             QMessageBox.Yes | QMessageBox.No,
         )
@@ -745,7 +745,7 @@ class MainWindow(QMainWindow):
     # ----- Send / Receive -----
     def _fetch_current(self):
         if self.current_account_id is None:
-            QMessageBox.information(self, "PyMail", "Please add and select an account.")
+            QMessageBox.information(self, "RunLab Mail", "Please add and select an account.")
             return
         # Use the rich progress dialog for explicit Send/Receive clicks
         self._start_sync_with_dialog([self.current_account_id])
@@ -951,7 +951,7 @@ class MainWindow(QMainWindow):
         except Exception:
             exp_str = expires_at
         self.banner.show_message(
-            f"<b>🎉 PyMail trial activated.</b> Your license is valid "
+            f"<b>🎉 RunLab Mail trial activated.</b> Your license is valid "
             f"until <b>{exp_str}</b>. Contact your admin to extend.",
             level="success",
             duration_ms=12000,
@@ -1128,7 +1128,7 @@ class MainWindow(QMainWindow):
 
     def _compose_new(self):
         if not database.list_accounts():
-            QMessageBox.warning(self, "PyMail", "Please add an account first.")
+            QMessageBox.warning(self, "RunLab Mail", "Please add an account first.")
             return
         dlg = ComposeDialog(self, account_id=self.current_account_id)
         self._track_compose(dlg)
@@ -1262,7 +1262,7 @@ class MainWindow(QMainWindow):
 
     # ----- Single instance -----
     def bring_to_front(self):
-        """Called when another PyMail launch is attempted. Surface this window."""
+        """Called when another RunLab Mail launch is attempted. Surface this window."""
         # Restore from minimized — if previously maximized, restore to maximized
         if self.isMinimized():
             self.showNormal()
@@ -1355,7 +1355,7 @@ class MainWindow(QMainWindow):
         else:
             extra = ""
         self.banner.show_message(
-            f"<b>PyMail {version} ready.</b> "
+            f"<b>RunLab Mail {version} ready.</b> "
             f"Restarting in {n}s. <a href='now'>Restart now</a> "
             f"<a href='cancel' style='color:#666;'>Cancel</a>{extra}",
             level="success",
@@ -1376,12 +1376,12 @@ class MainWindow(QMainWindow):
         saved = self._save_all_drafts()
         if saved > 0:
             self.banner.show_message(
-                f"Saved {saved} draft(s). Installing PyMail {version}...",
+                f"Saved {saved} draft(s). Installing RunLab Mail {version}...",
                 level="info", duration_ms=0,
             )
         else:
             self.banner.show_message(
-                f"Installing PyMail {version}...",
+                f"Installing RunLab Mail {version}...",
                 level="info", duration_ms=0,
             )
         # Force-process pending events so the user sees the message
@@ -1442,7 +1442,7 @@ class MainWindow(QMainWindow):
     # ----- License -----
     def _show_license_info(self):
         if not self.license_payload:
-            QMessageBox.information(self, "PyMail", "No license info available.")
+            QMessageBox.information(self, "RunLab Mail", "No license info available.")
             return
         LicenseInfoDialog(self.license_payload, self).exec_()
 
@@ -1451,7 +1451,7 @@ class MainWindow(QMainWindow):
         dlg.exec_()
 
     def _is_admin(self) -> bool:
-        """Admin = the developer who built this PyMail. We check both the
+        """Admin = the developer who built this RunLab Mail. We check both the
         license note (set when issuing your own license) and a known email."""
         if not self.license_payload:
             return False
@@ -1602,8 +1602,8 @@ class MainWindow(QMainWindow):
             f"pymail-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pymail"
         )
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export PyMail backup", default_name,
-            "PyMail backup (*.pymail);;All files (*)"
+            self, "Export RunLab Mail backup", default_name,
+            "RunLab Mail backup (*.pymail);;All files (*)"
         )
         if not path:
             return
@@ -1623,14 +1623,14 @@ class MainWindow(QMainWindow):
         from PyQt5.QtWidgets import QFileDialog
         import shutil
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import PyMail backup", "",
-            "PyMail backup (*.pymail);;Database files (*.db);;All files (*)"
+            self, "Import RunLab Mail backup", "",
+            "RunLab Mail backup (*.pymail);;Database files (*.db);;All files (*)"
         )
         if not path:
             return
         ret = QMessageBox.warning(
             self, "Replace current data?",
-            "Importing this backup will REPLACE your current PyMail data "
+            "Importing this backup will REPLACE your current RunLab Mail data "
             "(all accounts and emails).\n\n"
             "A safety copy of your current data will be created next to it "
             "before replacing.\n\nProceed?",
@@ -1650,7 +1650,7 @@ class MainWindow(QMainWindow):
             shutil.copy2(path, current)
             QMessageBox.information(
                 self, "Imported",
-                "Backup imported. PyMail will close now — please re-open it "
+                "Backup imported. RunLab Mail will close now — please re-open it "
                 "to load the imported data.",
             )
             from PyQt5.QtWidgets import QApplication
@@ -1673,7 +1673,7 @@ class MainWindow(QMainWindow):
         )
         QMessageBox.critical(
             self, "License revoked",
-            f"{err}\n\nPyMail will close now.",
+            f"{err}\n\nRunLab Mail will close now.",
         )
         # Force quit
         from PyQt5.QtWidgets import QApplication

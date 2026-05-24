@@ -254,6 +254,28 @@ def init_db():
                     "INSERT INTO emails_fts(rowid, subject, sender, body_plain) "
                     "SELECT id, subject, sender, body_plain FROM emails"
                 )
+            # FTS5 health check. If the index is corrupt (e.g. interrupted
+            # writes during a previous crash), an INSERT triggered by an
+            # UPDATE on `emails` will raise "database disk image is
+            # malformed" even though the rest of the DB is fine. Rebuild
+            # eagerly here so the user never sees that error.
+            try:
+                conn.execute(
+                    "INSERT INTO emails_fts(emails_fts) VALUES('integrity-check')"
+                )
+            except sqlite3.DatabaseError:
+                # Try to rebuild; if that also fails, drop and re-insert.
+                try:
+                    conn.execute(
+                        "INSERT INTO emails_fts(emails_fts) VALUES('rebuild')"
+                    )
+                except sqlite3.DatabaseError:
+                    conn.execute("DROP TABLE IF EXISTS emails_fts")
+                    conn.executescript(FTS_SCHEMA)
+                    conn.execute(
+                        "INSERT INTO emails_fts(rowid, subject, sender, body_plain) "
+                        "SELECT id, subject, sender, body_plain FROM emails"
+                    )
         except Exception:
             pass  # FTS not available — search will fall back to LIKE
 
@@ -288,13 +310,17 @@ def pending_migration_count() -> int:
 
 
 def move_to_spam(email_id: int):
-    with get_conn() as conn:
-        conn.execute("UPDATE emails SET folder='spam' WHERE id=?", (email_id,))
+    _exec_with_fts_repair(
+        "UPDATE emails SET folder='spam' WHERE id=?",
+        (email_id,),
+    )
 
 
 def move_to_inbox(email_id: int):
-    with get_conn() as conn:
-        conn.execute("UPDATE emails SET folder='inbox' WHERE id=?", (email_id,))
+    _exec_with_fts_repair(
+        "UPDATE emails SET folder='inbox' WHERE id=?",
+        (email_id,),
+    )
 
 
 # ---------- Manual contacts (CSV import target) ----------
@@ -889,14 +915,58 @@ def get_attachments_for_email(email_id: int):
         return out
 
 
+def _try_rebuild_fts():
+    """Best-effort FTS5 rebuild. Used as a recovery step when an
+    emails-table UPDATE fails because the FTS index is corrupt."""
+    try:
+        with get_conn() as conn:
+            conn.execute("INSERT INTO emails_fts(emails_fts) VALUES('rebuild')")
+        return True
+    except Exception:
+        pass
+    # Last resort: drop & rebuild from scratch
+    try:
+        with get_conn() as conn:
+            conn.execute("DROP TABLE IF EXISTS emails_fts")
+            conn.executescript(FTS_SCHEMA)
+            conn.execute(
+                "INSERT INTO emails_fts(rowid, subject, sender, body_plain) "
+                "SELECT id, subject, sender, body_plain FROM emails"
+            )
+        return True
+    except Exception:
+        return False
+
+
+def _exec_with_fts_repair(sql: str, params: tuple):
+    """Run an UPDATE/DELETE that fires FTS triggers. If we hit "database
+    disk image is malformed" (which only means the FTS index is bad —
+    PRAGMA integrity_check still says OK), rebuild FTS once and retry."""
+    try:
+        with get_conn() as conn:
+            conn.execute(sql, params)
+    except sqlite3.DatabaseError as e:
+        if "malformed" not in str(e).lower():
+            raise
+        if _try_rebuild_fts():
+            with get_conn() as conn:
+                conn.execute(sql, params)
+        else:
+            raise
+
+
 def mark_read(email_id: int, read: bool = True):
-    with get_conn() as conn:
-        conn.execute("UPDATE emails SET is_read=? WHERE id=?", (1 if read else 0, email_id))
+    _exec_with_fts_repair(
+        "UPDATE emails SET is_read=? WHERE id=?",
+        (1 if read else 0, email_id),
+    )
 
 
 def move_to_trash(email_id: int):
-    with get_conn() as conn:
-        conn.execute("UPDATE emails SET folder='trash' WHERE id=?", (email_id,))
+    _exec_with_fts_repair(
+        "UPDATE emails SET folder='trash' WHERE id=?",
+        (email_id,),
+    )
 
 
 def delete_email(email_id: int):

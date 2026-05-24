@@ -5,9 +5,52 @@ import smtplib
 import socket
 import ssl
 import os
+import re
+import base64
 import mimetypes
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
+
+
+_DATA_URI_RE = re.compile(
+    r'(<img\b[^>]*\bsrc\s*=\s*[\'"])'  # group 1: <img ... src="
+    r'data:image/([^;\'"]+);base64,'   # group 2: subtype (png/jpeg/gif)
+    r'([A-Za-z0-9+/=\s]+?)'            # group 3: base64 data (lazy)
+    r'([\'"])',                         # group 4: closing quote
+    re.IGNORECASE,
+)
+
+
+def _data_uris_to_cid(html: str) -> tuple[str, list[tuple[str, str, bytes]]]:
+    """Replace data:image base64 URIs in HTML with cid: references and
+    return the corresponding image payloads ready to be attached as
+    related parts.
+
+    Why: Gmail and Outlook render `data:` URIs inconsistently. Some clients
+    show them inline, some show them as separate "broken image" placeholders
+    or even strip them. The robust cross-client approach is to use proper
+    Content-ID references with the image as a related multipart attachment
+    (this is how Outlook and Apple Mail send signatures with logos).
+
+    Returns:
+        (rewritten_html, [(cid_no_brackets, mime_subtype, raw_bytes), ...])
+    """
+    images: list[tuple[str, str, bytes]] = []
+
+    def _replace(match: re.Match) -> str:
+        prefix, subtype, b64data, suffix = match.groups()
+        try:
+            data = base64.b64decode(b64data, validate=False)
+        except Exception:
+            return match.group(0)  # leave as-is
+        if not data:
+            return match.group(0)
+        cid = make_msgid()[1:-1]  # strip the < >
+        images.append((cid, subtype.lower(), data))
+        return f'{prefix}cid:{cid}{suffix}'
+
+    new_html = _DATA_URI_RE.sub(_replace, html)
+    return new_html, images
 
 
 class SMTPError(Exception):
@@ -76,7 +119,23 @@ def build_message(
 
     msg.set_content(body_text or "")
     if body_html:
-        msg.add_alternative(body_html, subtype="html")
+        # Convert any data:image base64 URIs to proper Content-ID
+        # multipart/related parts. Without this, Gmail/Outlook often
+        # render data: URIs as ugly broken-attachment placeholders or
+        # separate attachments at the bottom of the message.
+        body_html_cid, related_images = _data_uris_to_cid(body_html)
+        if related_images:
+            msg.add_alternative(body_html_cid, subtype="html")
+            html_part = msg.get_payload()[-1]
+            for cid, mime_subtype, img_bytes in related_images:
+                html_part.add_related(
+                    img_bytes,
+                    maintype="image",
+                    subtype=mime_subtype,
+                    cid=cid,
+                )
+        else:
+            msg.add_alternative(body_html, subtype="html")
 
     for att in attachments or []:
         # Two formats supported:

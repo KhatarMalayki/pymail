@@ -691,20 +691,34 @@ class MainWindow(QMainWindow):
 
         # ----- Subject-based fallback (catches threads where headers got
         # stripped by intermediaries — common in corporate setups).
-        # Group by normalized subject and union within each subject group.
-        subj_groups: dict[str, int] = {}
+        # Only union messages whose subject HAS a Re:/Fwd: prefix with
+        # an existing subject without one. We do NOT union all same-subject
+        # emails together, otherwise newsletters/notifications with
+        # identical subject lines (e.g. "New Article Release") would all
+        # collapse into one giant fake thread.
+        re_prefix = re.compile(
+            r"^\s*(?:re|fw|fwd|aw|sv)\s*:\s*",
+            re.IGNORECASE,
+        )
+        roots_by_subject: dict[str, int] = {}
         for e in emails:
-            subj = (e.get("subject") or "").strip()
-            normalized = re.sub(
-                r"^(?:re|fw|fwd|aw|sv)\s*:\s*", "",
-                subj, flags=re.IGNORECASE,
-            ).strip().lower()
-            if not normalized:
+            raw_subj = (e.get("subject") or "").strip()
+            stripped = re_prefix.sub("", raw_subj).strip().lower()
+            if not stripped:
                 continue
-            if normalized in subj_groups:
-                union(subj_groups[normalized], e["id"])
+            had_prefix = bool(re_prefix.match(raw_subj))
+            if had_prefix:
+                # This is a reply/forward — try to attach it to an existing
+                # thread root with the same normalized subject.
+                root_id = roots_by_subject.get(stripped)
+                if root_id is not None and root_id != e["id"]:
+                    union(root_id, e["id"])
             else:
-                subj_groups[normalized] = e["id"]
+                # First non-reply seen with this subject becomes the root.
+                # Subsequent non-reply messages with the same subject are
+                # NOT linked — they're treated as independent (e.g. weekly
+                # newsletter with the same subject every issue).
+                roots_by_subject.setdefault(stripped, e["id"])
 
         # ----- Collect threads
         threads: dict[int, list] = {}
@@ -1458,11 +1472,9 @@ class MainWindow(QMainWindow):
     def _quote_body_html(email) -> str:
         """Build the quoted body for a reply or forward.
 
-        Outlook-style: a separator block with the original sender/date/subject,
-        then the original HTML body (or plain body wrapped in <pre>) inset
-        with a left border.
-
-        Returns an HTML string ready to drop into a QTextEdit via insertHtml().
+        Outlook-style separator block: a thin gray rule, then a tinted
+        info box with the original sender/date/subject in muted color,
+        then the original HTML body inset with a left accent border.
         """
         import html as html_lib
         sender = email.get("sender") or ""
@@ -1472,23 +1484,46 @@ class MainWindow(QMainWindow):
         body_html = email.get("body_html") or ""
         body_plain = email.get("body_plain") or ""
 
-        # Header block (Outlook style: bold labels, monospace not needed)
-        # Use a <p> with border-top instead of <hr> because Qt's HTML
-        # subset doesn't always render <hr>
+        # Friendlier date label
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(date.replace("Z", "").replace("+00:00", ""))
+            date_pretty = dt.strftime("%a, %d %b %Y, %H:%M")
+        except Exception:
+            date_pretty = date
+
+        # Reply separator (Outlook-style):
+        #   - 24px breathing room above
+        #   - thin horizontal rule
+        #   - 8px gap
+        #   - light gray box with bold field labels
         header = (
-            "<p style=\"border-top:1px solid #c8c6c4;margin:14px 0 6px 0;"
-            "padding-top:10px;\">&nbsp;</p>"
-            "<div style=\"font-family:'Segoe UI',sans-serif;font-size:10pt;"
-            "color:#605e5c;margin-bottom:6px;\">"
-            f"<b>From:</b> {html_lib.escape(sender)}<br>"
-            f"<b>Sent:</b> {html_lib.escape(date)}<br>"
-            f"<b>To:</b> {html_lib.escape(recipients)}<br>"
+            "<div style=\"margin:24px 0 0 0;\">"
+            "<div style=\"border-top:2px solid #d1d1d1;height:0;"
+            "margin:0 0 12px 0;\"></div>"
+            "<div style=\"font-family:'Segoe UI','Calibri',sans-serif;"
+            "font-size:10pt;color:#444;background:#f7f7f7;"
+            "border-left:3px solid #0078d4;padding:10px 14px;"
+            "border-radius:2px;line-height:1.5;\">"
+            f"<div><b style=\"color:#222;\">From:</b> "
+            f"{html_lib.escape(sender)}</div>"
+            f"<div><b style=\"color:#222;\">Sent:</b> "
+            f"{html_lib.escape(date_pretty)}</div>"
+            f"<div><b style=\"color:#222;\">To:</b> "
+            f"{html_lib.escape(recipients)}</div>"
         )
         cc = email.get("cc")
         if cc:
-            header += f"<b>Cc:</b> {html_lib.escape(cc)}<br>"
-        header += f"<b>Subject:</b> {html_lib.escape(subject)}"
-        header += "</div>"
+            header += (
+                f"<div><b style=\"color:#222;\">Cc:</b> "
+                f"{html_lib.escape(cc)}</div>"
+            )
+        header += (
+            f"<div><b style=\"color:#222;\">Subject:</b> "
+            f"{html_lib.escape(subject)}</div>"
+            "</div>"
+            "</div>"
+        )
 
         # Body block — use HTML if we have it, otherwise wrap plain text
         if body_html:
@@ -1496,14 +1531,16 @@ class MainWindow(QMainWindow):
         else:
             escaped = html_lib.escape(body_plain)
             inner = (
-                "<pre style=\"font-family:'Segoe UI',sans-serif;font-size:10pt;"
-                "white-space:pre-wrap;margin:0;\">"
+                "<pre style=\"font-family:'Segoe UI','Calibri',sans-serif;"
+                "font-size:10pt;white-space:pre-wrap;margin:0;\">"
                 f"{escaped}</pre>"
             )
 
+        # Original body with subtle left accent
         return header + (
-            "<div style=\"border-left:3px solid #c8c6c4;padding-left:12px;"
-            "margin-left:0;\">" + inner + "</div>"
+            "<div style=\"margin:14px 0 0 0;padding:8px 0 0 14px;"
+            "border-left:2px solid #e1e1e1;\">"
+            + inner + "</div>"
         )
 
     # ----- Single instance -----

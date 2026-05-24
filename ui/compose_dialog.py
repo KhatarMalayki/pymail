@@ -6,10 +6,10 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QComboBox,
     QTextEdit, QPushButton, QFileDialog, QMessageBox, QListWidget,
     QListWidgetItem, QLabel, QToolBar, QAction, QWidget, QSizePolicy,
-    QCompleter,
+    QCompleter, QFontComboBox, QSpinBox, QColorDialog, QToolButton, QFrame,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt5.QtGui import QIcon, QFont
+from PyQt5.QtGui import QIcon, QFont, QTextCharFormat, QTextListFormat, QColor
 from core import database, smtp_client, contacts
 from .recipient_completer import attach_to as attach_completer
 
@@ -197,6 +197,10 @@ class ComposeDialog(QDialog):
             "QTextEdit { background:#ffffff; border:none; padding:16px 20px; "
             "font-size:10pt; }"
         )
+
+        # Formatting toolbar (Outlook-style: font, size, B/I/U, color, list)
+        fmt_bar = self._build_formatting_toolbar()
+        layout.addWidget(fmt_bar)
         layout.addWidget(self.body_edit, 1)
 
         # Status (bottom)
@@ -206,6 +210,240 @@ class ComposeDialog(QDialog):
             "border-top:1px solid #e1dfdd; background:#faf9f8;"
         )
         layout.addWidget(self.status_label)
+
+    def _build_formatting_toolbar(self) -> QFrame:
+        """Build an Outlook-style formatting toolbar that drives the
+        body QTextEdit (font, size, B/I/U/strike, color, list, alignment,
+        clear formatting)."""
+        frame = QFrame()
+        frame.setStyleSheet(
+            "QFrame { background:#faf9f8; border:none; "
+            "border-bottom:1px solid #e1dfdd; }"
+            "QToolButton { background:transparent; border:1px solid transparent; "
+            "padding:4px 6px; border-radius:4px; min-width:24px; }"
+            "QToolButton:hover { background:#edebe9; border:1px solid #d2d0ce; }"
+            "QToolButton:checked { background:#cfe4fa; border:1px solid #9ec7f0; }"
+            "QToolButton:pressed { background:#c1deff; }"
+            "QFontComboBox, QComboBox, QSpinBox { "
+            "background:#ffffff; border:1px solid #d2d0ce; border-radius:4px; "
+            "padding:2px 4px; }"
+        )
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(10, 6, 10, 6)
+        row.setSpacing(4)
+
+        # Font family
+        self.font_combo = QFontComboBox()
+        self.font_combo.setMaximumWidth(180)
+        self.font_combo.setCurrentFont(QFont("Segoe UI"))
+        self.font_combo.currentFontChanged.connect(self._on_font_family)
+        row.addWidget(self.font_combo)
+
+        # Font size
+        self.size_combo = QComboBox()
+        self.size_combo.setEditable(True)
+        self.size_combo.setMaximumWidth(64)
+        for s in (8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72):
+            self.size_combo.addItem(str(s))
+        self.size_combo.setCurrentText("10")
+        self.size_combo.activated.connect(self._on_font_size)
+        self.size_combo.lineEdit().editingFinished.connect(self._on_font_size)
+        row.addWidget(self.size_combo)
+
+        row.addWidget(self._sep())
+
+        # Bold / Italic / Underline / Strike
+        self.bold_btn = self._fmt_btn("B", "Bold (Ctrl+B)", self._toggle_bold, bold=True)
+        self.italic_btn = self._fmt_btn("I", "Italic (Ctrl+I)", self._toggle_italic, italic=True)
+        self.under_btn = self._fmt_btn("U", "Underline (Ctrl+U)", self._toggle_underline, underline=True)
+        self.strike_btn = self._fmt_btn("S", "Strikethrough", self._toggle_strike)
+        for b in (self.bold_btn, self.italic_btn, self.under_btn, self.strike_btn):
+            row.addWidget(b)
+
+        row.addWidget(self._sep())
+
+        # Color
+        color_btn = QToolButton()
+        color_btn.setText("A")
+        f = color_btn.font(); f.setBold(True); color_btn.setFont(f)
+        color_btn.setToolTip("Text color")
+        color_btn.clicked.connect(self._pick_color)
+        self._color_btn = color_btn
+        row.addWidget(color_btn)
+
+        row.addWidget(self._sep())
+
+        # Bullet / Numbered list
+        bullet_btn = QToolButton()
+        bullet_btn.setText("•")
+        bullet_btn.setToolTip("Bulleted list")
+        bullet_btn.clicked.connect(lambda: self._toggle_list(QTextListFormat.ListDisc))
+        row.addWidget(bullet_btn)
+
+        num_btn = QToolButton()
+        num_btn.setText("1.")
+        num_btn.setToolTip("Numbered list")
+        num_btn.clicked.connect(lambda: self._toggle_list(QTextListFormat.ListDecimal))
+        row.addWidget(num_btn)
+
+        row.addWidget(self._sep())
+
+        # Alignment
+        for label, tip, align in [
+            ("⇤", "Align left", Qt.AlignLeft),
+            ("⇔", "Align center", Qt.AlignCenter),
+            ("⇥", "Align right", Qt.AlignRight),
+        ]:
+            b = QToolButton()
+            b.setText(label)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, a=align: self.body_edit.setAlignment(a))
+            row.addWidget(b)
+
+        row.addWidget(self._sep())
+
+        # Clear formatting
+        clear_btn = QToolButton()
+        clear_btn.setText("⌫A")
+        clear_btn.setToolTip("Clear formatting")
+        clear_btn.clicked.connect(self._clear_format)
+        row.addWidget(clear_btn)
+
+        row.addStretch(1)
+
+        # Sync UI buttons when the cursor moves into a different format
+        self.body_edit.cursorPositionChanged.connect(self._sync_format_buttons)
+        self.body_edit.currentCharFormatChanged.connect(self._sync_format_buttons_from_fmt)
+        return frame
+
+    def _sep(self):
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        sep.setStyleSheet("color:#d2d0ce;")
+        sep.setMaximumWidth(8)
+        return sep
+
+    def _fmt_btn(self, label, tip, slot, bold=False, italic=False, underline=False):
+        b = QToolButton()
+        b.setText(label)
+        b.setToolTip(tip)
+        b.setCheckable(True)
+        f = b.font()
+        if bold: f.setBold(True)
+        if italic: f.setItalic(True)
+        if underline: f.setUnderline(True)
+        b.setFont(f)
+        b.clicked.connect(slot)
+        return b
+
+    # ---- Format actions ----
+    def _on_font_family(self, font: QFont):
+        fmt = QTextCharFormat()
+        fmt.setFontFamily(font.family())
+        self._merge_format(fmt)
+
+    def _on_font_size(self, *_):
+        try:
+            sz = float(self.size_combo.currentText())
+        except (TypeError, ValueError):
+            return
+        fmt = QTextCharFormat()
+        fmt.setFontPointSize(sz)
+        self._merge_format(fmt)
+
+    def _toggle_bold(self):
+        fmt = QTextCharFormat()
+        cur_w = self.body_edit.fontWeight()
+        fmt.setFontWeight(QFont.Normal if cur_w > QFont.Normal else QFont.Bold)
+        self._merge_format(fmt)
+
+    def _toggle_italic(self):
+        fmt = QTextCharFormat()
+        fmt.setFontItalic(not self.body_edit.fontItalic())
+        self._merge_format(fmt)
+
+    def _toggle_underline(self):
+        fmt = QTextCharFormat()
+        fmt.setFontUnderline(not self.body_edit.fontUnderline())
+        self._merge_format(fmt)
+
+    def _toggle_strike(self):
+        fmt = QTextCharFormat()
+        fmt.setFontStrikeOut(not self.body_edit.currentCharFormat().fontStrikeOut())
+        self._merge_format(fmt)
+
+    def _pick_color(self):
+        color = QColorDialog.getColor(
+            self.body_edit.textColor(), self, "Pick text color",
+        )
+        if not color.isValid():
+            return
+        fmt = QTextCharFormat()
+        fmt.setForeground(color)
+        self._merge_format(fmt)
+        # Tint the toolbar "A" so user sees current color
+        self._color_btn.setStyleSheet(
+            f"QToolButton {{ color:{color.name()}; font-weight:bold; }}"
+        )
+
+    def _toggle_list(self, style):
+        cursor = self.body_edit.textCursor()
+        cursor.beginEditBlock()
+        try:
+            current_list = cursor.currentList()
+            if current_list and current_list.format().style() == style:
+                # toggling off: convert each item back to a normal block
+                fmt = current_list.format()
+                # easiest path: set list style to ListStyleUndefined
+                lf = QTextListFormat()
+                lf.setStyle(QTextListFormat.ListStyleUndefined)
+                # Workaround: remove from the list by turning into plain block
+                blk = cursor.block()
+                current_list.removeItem(current_list.itemNumber(blk))
+            else:
+                lf = QTextListFormat()
+                lf.setStyle(style)
+                lf.setIndent(1)
+                cursor.createList(lf)
+        finally:
+            cursor.endEditBlock()
+
+    def _clear_format(self):
+        cursor = self.body_edit.textCursor()
+        if not cursor.hasSelection():
+            return
+        fmt = QTextCharFormat()
+        fmt.setFont(QFont("Segoe UI", 10))
+        cursor.setCharFormat(fmt)
+
+    def _merge_format(self, fmt: QTextCharFormat):
+        cursor = self.body_edit.textCursor()
+        if cursor.hasSelection():
+            cursor.mergeCharFormat(fmt)
+        self.body_edit.mergeCurrentCharFormat(fmt)
+
+    def _sync_format_buttons(self):
+        self._sync_format_buttons_from_fmt(self.body_edit.currentCharFormat())
+
+    def _sync_format_buttons_from_fmt(self, fmt: QTextCharFormat):
+        try:
+            self.bold_btn.setChecked(fmt.fontWeight() > QFont.Normal)
+            self.italic_btn.setChecked(fmt.fontItalic())
+            self.under_btn.setChecked(fmt.fontUnderline())
+            self.strike_btn.setChecked(fmt.fontStrikeOut())
+            family = fmt.fontFamily()
+            if family:
+                self.font_combo.blockSignals(True)
+                self.font_combo.setCurrentFont(QFont(family))
+                self.font_combo.blockSignals(False)
+            sz = fmt.fontPointSize()
+            if sz > 0:
+                self.size_combo.blockSignals(True)
+                self.size_combo.setCurrentText(str(int(sz)))
+                self.size_combo.blockSignals(False)
+        except Exception:
+            pass
 
     def _load_accounts(self, preferred_id):
         self.accounts = database.list_accounts()
@@ -240,12 +478,20 @@ class ComposeDialog(QDialog):
         )
 
     def _apply_signature(self, *_):
-        """Append the signature to the body if not already present.
+        """Insert the signature into a fresh compose body.
 
-        - For rich-text signatures (HTML), insert as HTML so formatting
-          and inline images survive.
-        - For plain-text signatures, prepend the standard "-- " separator
-          per RFC convention.
+        Layout:
+            <user typing area — default font, no inherited formatting>
+            <empty line>
+            <signature>
+
+        The signature is inserted as HTML at the END, but we explicitly
+        reset the editor's current char format afterwards and move the
+        cursor to the TOP. This prevents the signature's font color/family
+        (often blue links or branded fonts) from "leaking" into what the
+        user types. Without this fix, typing in a fresh compose would
+        come out in the signature's color (the user reported text turning
+        blue and needing two enters).
         """
         sig = self._signature_for_current()
         if not sig:
@@ -257,19 +503,35 @@ class ComposeDialog(QDialog):
         if sig_plain_marker and sig_plain_marker in body_plain:
             return
 
+        from PyQt5.QtGui import QTextCharFormat, QTextBlockFormat, QFont
+
         cursor = self.body_edit.textCursor()
-        # Move to the very end of the document
         cursor.movePosition(cursor.End)
+
+        # Insert exactly one paragraph break before the signature so there
+        # is one empty line for the user to start typing in. (Was 2; that's
+        # why the user had to press Enter twice to "escape" the formatting.)
         if self._is_html(sig):
-            # Two blank lines, then the rich signature
-            cursor.insertHtml("<p></p><p></p>")
+            cursor.insertBlock()
             cursor.insertHtml(sig)
         else:
-            cursor.insertText("\n\n-- \n" + sig + "\n")
+            cursor.insertText("\n-- \n" + sig + "\n")
 
-        # Place caret at the top so user types ABOVE the signature
+        # Reset the editor's *current* char/block format to the document
+        # default, then place the caret at the very top. The user's first
+        # keystroke will use these default formats — not the signature's.
         cursor.movePosition(cursor.Start)
+        default_char = QTextCharFormat()
+        default_char.setFont(QFont("Segoe UI", 10))
+        default_char.clearForeground()
+        default_char.clearBackground()
+        cursor.setCharFormat(default_char)
+
+        default_block = QTextBlockFormat()
+        cursor.setBlockFormat(default_block)
+
         self.body_edit.setTextCursor(cursor)
+        self.body_edit.setCurrentCharFormat(default_char)
 
     def _prepend_signature_for_reply(self):
         """Insert signature at the TOP of the body, before the quoted
@@ -284,21 +546,33 @@ class ComposeDialog(QDialog):
         if sig_marker and sig_marker in body_plain:
             return  # already there
 
+        from PyQt5.QtGui import QTextCharFormat, QTextBlockFormat, QFont
+
         cursor = self.body_edit.textCursor()
         cursor.movePosition(cursor.Start)
 
-        # Two blank paragraphs at top → user can type, then the signature,
-        # then the quoted block (which is already in the body).
+        # One empty line at top, then signature, then a separator line.
         if self._is_html(sig):
-            cursor.insertHtml("<p></p><p></p>")
+            cursor.insertBlock()
             cursor.insertHtml(sig)
-            cursor.insertHtml("<p></p>")
+            cursor.insertBlock()
         else:
-            cursor.insertText("\n\n-- \n" + sig + "\n\n")
+            cursor.insertText("\n-- \n" + sig + "\n\n")
 
-        # Caret to the very top so the user starts typing above the signature
+        # Caret to the very top + default char format so the user types
+        # cleanly above the signature.
         cursor.movePosition(cursor.Start)
+        default_char = QTextCharFormat()
+        default_char.setFont(QFont("Segoe UI", 10))
+        default_char.clearForeground()
+        default_char.clearBackground()
+        cursor.setCharFormat(default_char)
+
+        default_block = QTextBlockFormat()
+        cursor.setBlockFormat(default_block)
+
         self.body_edit.setTextCursor(cursor)
+        self.body_edit.setCurrentCharFormat(default_char)
 
     @staticmethod
     def _sig_plain_excerpt(sig: str) -> str:

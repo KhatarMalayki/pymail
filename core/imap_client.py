@@ -249,3 +249,88 @@ def _quote(name: str) -> str:
         safe = name.replace('"', '\\"')
         return f'"{safe}"'
     return name
+
+
+def purge_junk_on_server(account: dict, uidls: list[str], log_cb=None) -> int:
+    """Delete the given Junk messages on the server via IMAP.
+
+    Args:
+        account: account dict (must have IMAP creds + junk_folder_name).
+        uidls: list of LOCAL UIDLs (with the imap-junk: prefix) to purge.
+
+    Returns: count of messages successfully marked-deleted + expunged.
+
+    Notes:
+        - Only UIDs that originated from IMAP (have the IMAP_UID_PREFIX)
+          are touched on the server. Locally-marked junk (originally from
+          POP3 inbox) is left alone on the server because POP3 has no way
+          to tell us which message that is.
+        - Uses STORE +FLAGS \\Deleted then EXPUNGE. This is destructive
+          on the server; PyMail only does it when the user has explicitly
+          enabled "Also delete on server" in account settings.
+    """
+    if not uidls:
+        return 0
+    if not account.get("imap_enabled") or not account.get("imap_host"):
+        return 0
+
+    # Strip the prefix and keep only IMAP-origin UIDs
+    server_uids = []
+    for u in uidls:
+        if u and u.startswith(IMAP_UID_PREFIX):
+            server_uids.append(u[len(IMAP_UID_PREFIX):])
+    if not server_uids:
+        return 0
+
+    folder_name = account.get("junk_folder_name") or detect_junk_folder(account)
+    if not folder_name:
+        if log_cb:
+            log_cb("[IMAP Junk purge] No Junk folder found; skipping server delete.")
+        return 0
+
+    if log_cb:
+        log_cb(f"[IMAP Junk purge] Marking {len(server_uids)} message(s) for deletion in '{folder_name}'...")
+
+    conn = _connect(account)
+    purged = 0
+    try:
+        # Open WRITABLE this time (not readonly)
+        typ, data = conn.select(_quote(folder_name), readonly=False)
+        if typ != "OK":
+            if log_cb:
+                log_cb(f"[IMAP Junk purge] Cannot open folder '{folder_name}': {data}")
+            return 0
+
+        # Batch in chunks of 200 UIDs to keep command size sane
+        BATCH = 200
+        for i in range(0, len(server_uids), BATCH):
+            chunk = server_uids[i:i + BATCH]
+            uid_set = ",".join(chunk)
+            try:
+                typ, _ = conn.uid("STORE", uid_set, "+FLAGS", "(\\Deleted)")
+                if typ == "OK":
+                    purged += len(chunk)
+            except Exception as e:
+                if log_cb:
+                    log_cb(f"[IMAP Junk purge] STORE failed for batch: {e}")
+                continue
+
+        # Permanent delete
+        try:
+            conn.expunge()
+        except Exception as e:
+            if log_cb:
+                log_cb(f"[IMAP Junk purge] EXPUNGE failed: {e}")
+
+        if log_cb:
+            log_cb(f"[IMAP Junk purge] Deleted {purged} message(s) on server.")
+        return purged
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        try:
+            conn.logout()
+        except Exception:
+            pass

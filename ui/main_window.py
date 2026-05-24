@@ -18,6 +18,7 @@ from core import imap_client
 from core import license as licmod
 from core.version import __version__
 from .account_dialog import AccountDialog
+from .accounts_list_dialog import AccountsListDialog
 from .compose_dialog import ComposeDialog
 from .email_view import EmailView
 from .update_dialog import UpdateDialog
@@ -138,6 +139,44 @@ class WorkerVerifyWorker(QThread):
 
 
 # ---------- Worker ----------
+def _purge_old_junk(account: dict, log_cb=None) -> int:
+    """Auto-delete junk older than `junk_purge_days` for the given account.
+
+    Always purges locally. If `junk_purge_server` is also set AND IMAP is
+    enabled, also EXPUNGEs from the server. POP3-origin junk is local-only
+    no matter what (POP3 has no folder semantics)."""
+    import datetime as _dt
+    days = int(account.get("junk_purge_days") or 0)
+    if days <= 0:
+        return 0
+    cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=days)).isoformat()
+    rows = database.list_old_junk(account["id"], cutoff)
+    if not rows:
+        database.set_junk_purge_last_run(account["id"], _dt.datetime.utcnow().isoformat())
+        return 0
+
+    # Server-side delete first (so if we crash, local cleanup retries next time)
+    if account.get("junk_purge_server") and account.get("imap_enabled"):
+        try:
+            uidls = [r["uidl"] for r in rows if r.get("uidl")]
+            imap_client.purge_junk_on_server(account, uidls, log_cb=log_cb)
+        except Exception as e:
+            if log_cb:
+                log_cb(f"[Junk purge] Server delete failed (will still purge local): {e}")
+
+    # Local delete
+    purged_local = 0
+    for r in rows:
+        try:
+            database.delete_email(r["id"])
+            purged_local += 1
+        except Exception:
+            continue
+
+    database.set_junk_purge_last_run(account["id"], _dt.datetime.utcnow().isoformat())
+    return purged_local
+
+
 class FetchWorker(QThread):
     log = pyqtSignal(str)
     progress = pyqtSignal(int, int)
@@ -166,6 +205,13 @@ class FetchWorker(QThread):
                     new_count += junk_count
                 except Exception as e:
                     self.log.emit(f"[IMAP Junk] Skipped: {e}")
+            # Auto-purge old junk (local + optionally server)
+            try:
+                purged = _purge_old_junk(self.account, log_cb=lambda m: self.log.emit(m))
+                if purged:
+                    self.log.emit(f"[Junk purge] Removed {purged} old junk message(s).")
+            except Exception as e:
+                self.log.emit(f"[Junk purge] Skipped: {e}")
             self.done.emit(self.account["id"], new_count, "")
         except Exception as e:
             self.done.emit(self.account["id"], 0, str(e))
@@ -328,8 +374,8 @@ class MainWindow(QMainWindow):
         act_account = QAction(
             st.standardIcon(QStyle.SP_DialogOpenButton), "Accounts", self
         )
-        act_account.setToolTip("Add a new email account")
-        act_account.triggered.connect(self._add_account)
+        act_account.setToolTip("Manage email accounts (add, edit, delete)")
+        act_account.triggered.connect(self._open_accounts)
         tb.addAction(act_account)
 
         act_backup = QAction(
@@ -770,6 +816,12 @@ class MainWindow(QMainWindow):
             self._update_folder_counts()
 
     # ----- Account actions -----
+    def _open_accounts(self):
+        """Toolbar 'Accounts' button: list view of all accounts."""
+        dlg = AccountsListDialog(self)
+        dlg.exec_()
+        self._refresh_accounts_tree()
+
     def _add_account(self):
         dlg = AccountDialog(self)
         if dlg.exec_():

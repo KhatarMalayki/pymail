@@ -158,6 +158,41 @@ class AccountDialog(QDialog):
         iform.addRow("Junk folder:", self.junk_folder)
         iform.addRow("", self.imap_copy_pop_btn)
         iform.addRow("", self.imap_test_btn)
+
+        # ---- Auto-purge ----
+        purge_label = QLabel(
+            "<hr><b>Auto-purge old Junk</b><br>"
+            "<i style='color:#605e5c;'>"
+            "Periodically delete junk older than the threshold. "
+            "Set to 0 to disable. Runs as part of every Send/Receive."
+            "</i>"
+        )
+        purge_label.setTextFormat(Qt.RichText)
+        purge_label.setWordWrap(True)
+        iform.addRow(purge_label)
+
+        self.junk_purge_days = QSpinBox()
+        self.junk_purge_days.setRange(0, 365)
+        self.junk_purge_days.setSuffix(" days")
+        self.junk_purge_days.setSpecialValueText("Disabled")
+        self.junk_purge_days.setValue(0)
+        self.junk_purge_days.setToolTip(
+            "0 = never auto-purge. 30 = delete junk older than 30 days. "
+            "Recommended: 30–90 days."
+        )
+        iform.addRow("Delete junk older than:", self.junk_purge_days)
+
+        self.junk_purge_server = QCheckBox(
+            "Also delete on server (uses IMAP EXPUNGE — destructive)"
+        )
+        self.junk_purge_server.setToolTip(
+            "ON: PyMail issues IMAP STORE +FLAGS \\Deleted then EXPUNGE for "
+            "junk older than the threshold. The Junk folder on the Carbonio "
+            "server stays clean.\n\n"
+            "OFF: PyMail only deletes the local copy. Server keeps everything."
+        )
+        iform.addRow("", self.junk_purge_server)
+
         tabs.addTab(imap_tab, "Junk via IMAP")
 
         # Initial state: disabled until checkbox ticked
@@ -326,6 +361,8 @@ class AccountDialog(QDialog):
         self.imap_port.setValue(int(a.get("imap_port") or 993))
         self.imap_ssl.setChecked(bool(a.get("imap_ssl") if a.get("imap_ssl") is not None else 1))
         self.junk_folder.setText(a.get("junk_folder_name") or "")
+        self.junk_purge_days.setValue(int(a.get("junk_purge_days") or 0))
+        self.junk_purge_server.setChecked(bool(a.get("junk_purge_server")))
         self._on_imap_toggled(self.imap_enabled.isChecked())
 
     def _collect(self) -> dict:
@@ -357,6 +394,8 @@ class AccountDialog(QDialog):
             "imap_port": self.imap_port.value(),
             "imap_ssl": 1 if self.imap_ssl.isChecked() else 0,
             "junk_folder_name": self.junk_folder.text().strip(),
+            "junk_purge_days": self.junk_purge_days.value(),
+            "junk_purge_server": 1 if self.junk_purge_server.isChecked() else 0,
         }
 
     @staticmethod
@@ -501,7 +540,8 @@ class AccountDialog(QDialog):
     # ---- IMAP (Junk fetch) ----
     def _on_imap_toggled(self, checked: bool):
         for w in (self.imap_host, self.imap_port, self.imap_ssl,
-                  self.junk_folder, self.imap_copy_pop_btn, self.imap_test_btn):
+                  self.junk_folder, self.imap_copy_pop_btn, self.imap_test_btn,
+                  self.junk_purge_days, self.junk_purge_server):
             w.setEnabled(checked)
 
     def _copy_pop_to_imap(self):

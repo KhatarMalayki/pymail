@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     imap_ssl        INTEGER DEFAULT 1,
     junk_folder_name TEXT,
     imap_enabled    INTEGER DEFAULT 0,
+    junk_purge_days INTEGER DEFAULT 0,
+    junk_purge_server INTEGER DEFAULT 0,
+    junk_purge_last_run TEXT,
     created_at      TEXT
 );
 
@@ -159,6 +162,15 @@ def _migrate(conn):
         conn.execute("ALTER TABLE accounts ADD COLUMN junk_folder_name TEXT")
     if "imap_enabled" not in cols:
         conn.execute("ALTER TABLE accounts ADD COLUMN imap_enabled INTEGER DEFAULT 0")
+
+    # Junk auto-purge (delete junk older than N days, optionally on the
+    # server too via IMAP EXPUNGE).
+    if "junk_purge_days" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN junk_purge_days INTEGER DEFAULT 0")
+    if "junk_purge_server" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN junk_purge_server INTEGER DEFAULT 0")
+    if "junk_purge_last_run" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN junk_purge_last_run TEXT")
 
     # attachments.file_hash (legacy DBs only had `data` BLOB)
     cur = conn.execute("PRAGMA table_info(attachments)")
@@ -329,6 +341,7 @@ def add_account(data: dict) -> int:
         "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_password",
         "signature",
         "imap_host", "imap_port", "imap_ssl", "junk_folder_name", "imap_enabled",
+        "junk_purge_days", "junk_purge_server",
         "created_at",
     ]
     data = {**data, "created_at": datetime.utcnow().isoformat()}
@@ -351,6 +364,7 @@ def update_account(account_id: int, data: dict):
         "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_password",
         "signature",
         "imap_host", "imap_port", "imap_ssl", "junk_folder_name", "imap_enabled",
+        "junk_purge_days", "junk_purge_server",
     ]
     sets = ",".join([f"{c}=?" for c in cols])
     values = [data.get(c) for c in cols] + [account_id]
@@ -372,6 +386,28 @@ def get_account(account_id: int):
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
         return dict(row) if row else None
+
+
+def set_junk_purge_last_run(account_id: int, when_iso: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE accounts SET junk_purge_last_run=? WHERE id=?",
+            (when_iso, account_id),
+        )
+
+
+def list_old_junk(account_id: int, older_than_iso: str) -> list[dict]:
+    """Return Junk emails older than the given ISO date for a given account.
+    Each row includes id and uidl so the IMAP purger can map back to UIDs."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, uidl, subject, date_received "
+            "FROM emails WHERE account_id=? AND folder='spam' "
+            "AND date_received IS NOT NULL AND date_received < ? "
+            "ORDER BY date_received ASC",
+            (account_id, older_than_iso),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 # ---------- Emails ----------

@@ -461,6 +461,7 @@ class MainWindow(QMainWindow):
 
         self.email_list = EmailListWidget()
         self.email_list.itemSelectionChanged.connect(self._on_email_selected)
+        self.email_list.itemDoubleClicked.connect(self._on_email_double_clicked)
         self.email_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.email_list.customContextMenuRequested.connect(self._list_menu)
         self.email_list.request_more.connect(self._load_more_emails)
@@ -638,37 +639,107 @@ class MainWindow(QMainWindow):
             self.email_list.add_email(e, self.current_folder)
 
     def _apply_grouping(self, emails: list) -> list:
-        """Group emails by normalized subject (Re:/Fwd: stripped). Within a
-        group, the most recent email is shown; the count is appended to the
-        subject. This is a lightweight conversation view — clicking a
-        grouped item opens the latest message of that thread."""
+        """Group emails into conversation threads using RFC 5322 headers
+        (In-Reply-To / References) with subject as fallback. Each group's
+        head row shows: (subject, "↳ N messages") and an arrow icon to
+        indicate it's a thread.
+
+        Within a group, the most-recent email is shown as the head; the
+        thread is "collapsed" — clicking opens the latest message."""
         import re
-        groups: dict[str, list] = {}
-        order: list[str] = []
+
+        # ----- Build message_id -> email lookup
+        by_msgid: dict[str, dict] = {}
+        for e in emails:
+            mid = (e.get("message_id") or "").strip("<>").strip()
+            if mid:
+                by_msgid.setdefault(mid, e)
+
+        # ----- Union-Find for threading
+        parent: dict[int, int] = {}
+
+        def find(i):
+            while parent.get(i, i) != i:
+                parent[i] = parent.get(parent[i], parent[i])
+                i = parent[i]
+            return i
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        # Initialize each email as its own thread
+        for e in emails:
+            parent[e["id"]] = e["id"]
+
+        # Link by In-Reply-To and References (split on whitespace, take all)
+        ref_re = re.compile(r"<[^>]+>")
+        for e in emails:
+            related = []
+            ir = (e.get("in_reply_to") or "").strip()
+            if ir:
+                related.extend(ref_re.findall(ir) or [ir])
+            refs = (e.get("references_hdr") or "").strip()
+            if refs:
+                related.extend(ref_re.findall(refs))
+            for token in related:
+                token_clean = token.strip("<>").strip()
+                parent_email = by_msgid.get(token_clean)
+                if parent_email and parent_email["id"] != e["id"]:
+                    union(parent_email["id"], e["id"])
+
+        # ----- Subject-based fallback (catches threads where headers got
+        # stripped by intermediaries — common in corporate setups).
+        # Group by normalized subject and union within each subject group.
+        subj_groups: dict[str, int] = {}
         for e in emails:
             subj = (e.get("subject") or "").strip()
             normalized = re.sub(
                 r"^(?:re|fw|fwd|aw|sv)\s*:\s*", "",
                 subj, flags=re.IGNORECASE,
-            ).strip().lower() or "(no subject)"
-            if normalized not in groups:
-                groups[normalized] = []
-                order.append(normalized)
-            groups[normalized].append(e)
+            ).strip().lower()
+            if not normalized:
+                continue
+            if normalized in subj_groups:
+                union(subj_groups[normalized], e["id"])
+            else:
+                subj_groups[normalized] = e["id"]
 
+        # ----- Collect threads
+        threads: dict[int, list] = {}
+        order: list[int] = []
+        for e in emails:
+            root = find(e["id"])
+            if root not in threads:
+                threads[root] = []
+                order.append(root)
+            threads[root].append(e)
+
+        # ----- Build the visible head row per thread
         result = []
-        for key in order:
-            items = groups[key]
-            head = dict(items[0])  # most recent per current sort
-            if len(items) > 1:
-                head["subject"] = (
-                    f"{head.get('subject') or '(no subject)'}  "
-                    f"({len(items)} messages)"
-                )
-                # If any in the thread is unread, mark head unread so the
-                # bold/blue accent shows
+        for root in order:
+            items = threads[root]
+            # Most-recent first (preserve current sort order)
+            head = dict(items[0])
+            count = len(items)
+            if count > 1:
+                # Strip the "Re: / Fwd:" so the displayed subject reads cleanly,
+                # then prepend the thread arrow + count.
+                base_subj = head.get("subject") or "(no subject)"
+                clean = re.sub(
+                    r"^(?:\s*(?:re|fw|fwd|aw|sv)\s*:\s*)+", "",
+                    base_subj, flags=re.IGNORECASE,
+                ).strip() or "(no subject)"
+                head["subject"] = f"⤷  {clean}  ({count} messages)"
+                # Mark unread if any in the thread is unread
                 if any(not it.get("is_read") for it in items):
                     head["is_read"] = 0
+                # Mark has_attachments if any in the thread has them
+                if any(it.get("has_attachments") for it in items):
+                    head["has_attachments"] = 1
+                # Stash the full thread on the head for later (optional)
+                head["_thread_ids"] = [it["id"] for it in items]
             result.append(head)
         return result
 
@@ -709,6 +780,38 @@ class MainWindow(QMainWindow):
         if row >= 0:
             self.email_list.mark_read_visual(row)
         self._update_folder_counts()
+
+    def _on_email_double_clicked(self, item):
+        """Open the email in a popup window (Outlook-style detail view)."""
+        from .email_window import EmailWindow
+        email_id = item.data(ROLE_EMAIL_ID)
+        if email_id is None:
+            return
+        # Drafts: open in compose dialog
+        if self.current_folder == "drafts":
+            self._open_draft(email_id)
+            return
+        # Reuse existing window if user already opened this email
+        if not hasattr(self, "_email_windows"):
+            self._email_windows = []
+        # Clean up closed windows
+        self._email_windows = [w for w in self._email_windows if w.isVisible()]
+        for w in self._email_windows:
+            if getattr(w, "_email_id", None) == email_id:
+                w.raise_()
+                w.activateWindow()
+                return
+        win = EmailWindow(email_id, parent=self)
+        win.compose_requested.connect(self._on_compose_from_email_window)
+        self._email_windows.append(win)
+        win.show()
+
+    def _on_compose_from_email_window(self, kind: str, email_id: int):
+        """Reply/Reply-All/Forward triggered from a detached EmailWindow.
+        kind = 'reply' | 'reply_all' | 'forward'."""
+        email = database.get_email(email_id)
+        if email:
+            self._reply_or_forward(email, kind)
 
     def _update_folder_counts(self):
         if self.current_account_id is None:

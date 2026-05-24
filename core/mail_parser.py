@@ -24,6 +24,8 @@ def parse_message(raw_bytes: bytes, uidl: str = None) -> dict:
     parsed = {
         "uidl": uidl,
         "message_id": _decode_header(msg.get("Message-ID")),
+        "in_reply_to": _decode_header(msg.get("In-Reply-To")),
+        "references": _decode_header(msg.get("References")),
         "from": _decode_header(msg.get("From")),
         "to": _decode_header(msg.get("To")),
         "cc": _decode_header(msg.get("Cc")),

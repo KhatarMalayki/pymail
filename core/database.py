@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS emails (
     folder          TEXT NOT NULL,
     uidl            TEXT,
     message_id      TEXT,
+    in_reply_to     TEXT,
+    references_hdr  TEXT,
     sender          TEXT,
     recipients      TEXT,
     cc              TEXT,
@@ -177,6 +179,14 @@ def _migrate(conn):
     att_cols = {row[1] for row in cur.fetchall()}
     if "file_hash" not in att_cols:
         conn.execute("ALTER TABLE attachments ADD COLUMN file_hash TEXT")
+
+    # Conversation threading (RFC 5322 In-Reply-To / References)
+    cur = conn.execute("PRAGMA table_info(emails)")
+    email_cols = {row[1] for row in cur.fetchall()}
+    if "in_reply_to" not in email_cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN in_reply_to TEXT")
+    if "references_hdr" not in email_cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN references_hdr TEXT")
 
 
 def _migrate_blobs_to_store(conn, batch_size: int = 25):
@@ -454,13 +464,16 @@ def insert_email(account_id: int, folder: str, parsed: dict, attachments: list) 
     with get_conn() as conn:
         cur = conn.execute("""
             INSERT INTO emails(
-                account_id, folder, uidl, message_id, sender, recipients,
+                account_id, folder, uidl, message_id,
+                in_reply_to, references_hdr,
+                sender, recipients,
                 cc, bcc, subject, date_received, date_sent,
                 body_plain, body_html, is_read, has_attachments, raw_size
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             account_id, folder,
             parsed.get("uidl"), parsed.get("message_id"),
+            parsed.get("in_reply_to"), parsed.get("references"),
             parsed.get("from"), parsed.get("to"),
             parsed.get("cc"), parsed.get("bcc"),
             parsed.get("subject"),
@@ -578,7 +591,8 @@ def list_emails(account_id: int, folder: str, search: str = "",
                     return []
                 placeholders = ",".join("?" * len(fts_results))
                 sql = (
-                    "SELECT id, sender, recipients, subject, date_received, "
+                    "SELECT id, message_id, in_reply_to, references_hdr, "
+                    "sender, recipients, subject, date_received, "
                     "is_read, has_attachments, raw_size, "
                     "substr(coalesce(body_plain,''),1,200) AS preview "
                     "FROM emails "
@@ -593,7 +607,8 @@ def list_emails(account_id: int, folder: str, search: str = "",
 
             # Fallback: LIKE scan
             sql = (
-                "SELECT id, sender, recipients, subject, date_received, "
+                "SELECT id, message_id, in_reply_to, references_hdr, "
+                "sender, recipients, subject, date_received, "
                 "is_read, has_attachments, raw_size, "
                 "substr(coalesce(body_plain,''),1,200) AS preview "
                 "FROM emails "
@@ -610,7 +625,8 @@ def list_emails(account_id: int, folder: str, search: str = "",
 
         # No search — straight pagination over the index
         sql = (
-            "SELECT id, sender, recipients, subject, date_received, "
+            "SELECT id, message_id, in_reply_to, references_hdr, "
+            "sender, recipients, subject, date_received, "
             "is_read, has_attachments, raw_size, "
             "substr(coalesce(body_plain,''),1,200) AS preview "
             "FROM emails "

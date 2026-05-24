@@ -190,9 +190,21 @@ class PasteAwareTextEdit(QTextEdit):
             return
 
         html = source.html()
-        # Always pass through the embed/constrain pipeline. Even if there
-        # are no external image URLs, _embed_images_in_html will at least
-        # cap the size of any inline <img> tags.
+        # If the HTML has no external image URLs (http/https), nothing for
+        # us to embed — let Qt handle the paste natively. This preserves
+        # complex content like Excel tables, Word documents, etc. that
+        # our regex-based pipeline would otherwise mangle.
+        import re
+        external_imgs = re.search(
+            r'<img\b[^>]*\bsrc\s*=\s*[\'"]https?://',
+            html, re.IGNORECASE,
+        )
+        if not external_imgs:
+            super().insertFromMimeData(source)
+            return
+
+        # Otherwise we run the full embed/constrain pipeline so signatures
+        # with remote images become self-contained.
         QApplication.setOverrideCursor(Qt.BusyCursor)
         try:
             new_html, _, _ = _embed_images_in_html(html)

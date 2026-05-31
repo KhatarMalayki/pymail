@@ -12,7 +12,7 @@ from PyQt5.QtGui import (
     QDesktopServices, QFont, QPainter, QColor, QPixmap, QBrush, QPen,
 )
 from core import database
-from .theme import avatar_color_for, initials_of
+from .theme import avatar_color_for, initials_of, color as theme_color
 
 
 def _make_avatar_pixmap(text: str, size: int = 40) -> QPixmap:
@@ -51,7 +51,8 @@ class EmailView(QWidget):
         # Header panel
         self.header_frame = QFrame()
         self.header_frame.setStyleSheet(
-            "QFrame { background: #ffffff; border-bottom: 1px solid #e1dfdd; }"
+            f"QFrame {{ background: {theme_color('bg')}; "
+            f"border-bottom: 1px solid {theme_color('border')}; }}"
         )
         h_layout = QVBoxLayout(self.header_frame)
         h_layout.setContentsMargins(24, 18, 24, 16)
@@ -61,7 +62,7 @@ class EmailView(QWidget):
         f = QFont(); f.setPointSize(15); f.setWeight(QFont.DemiBold)
         self.subject_label.setFont(f)
         self.subject_label.setWordWrap(True)
-        self.subject_label.setStyleSheet("color:#201f1e;")
+        self.subject_label.setStyleSheet(f"color:{theme_color('text')};")
         h_layout.addWidget(self.subject_label)
 
         # Sender row: avatar + name/email + date on the right
@@ -80,11 +81,15 @@ class EmailView(QWidget):
         self.sender_name_label = QLabel()
         f2 = QFont(); f2.setPointSize(10); f2.setWeight(QFont.DemiBold)
         self.sender_name_label.setFont(f2)
-        self.sender_name_label.setStyleSheet("color:#201f1e;")
+        self.sender_name_label.setStyleSheet(f"color:{theme_color('text')};")
         self.sender_email_label = QLabel()
-        self.sender_email_label.setStyleSheet("color:#605e5c; font-size:9pt;")
+        self.sender_email_label.setStyleSheet(
+            f"color:{theme_color('text_muted')}; font-size:9pt;"
+        )
         self.recipients_label = QLabel()
-        self.recipients_label.setStyleSheet("color:#605e5c; font-size:9pt;")
+        self.recipients_label.setStyleSheet(
+            f"color:{theme_color('text_muted')}; font-size:9pt;"
+        )
         self.recipients_label.setWordWrap(True)
         sender_text_col.addWidget(self.sender_name_label)
         sender_text_col.addWidget(self.sender_email_label)
@@ -92,7 +97,9 @@ class EmailView(QWidget):
         sender_row.addLayout(sender_text_col, 1)
 
         self.date_label = QLabel()
-        self.date_label.setStyleSheet("color:#605e5c; font-size:9pt;")
+        self.date_label.setStyleSheet(
+            f"color:{theme_color('text_muted')}; font-size:9pt;"
+        )
         self.date_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
         sender_row.addWidget(self.date_label, 0, Qt.AlignTop)
 
@@ -100,7 +107,9 @@ class EmailView(QWidget):
 
         # Cc (only shown if present)
         self.cc_label = QLabel()
-        self.cc_label.setStyleSheet("color:#605e5c; font-size:9pt; padding-left:56px;")
+        self.cc_label.setStyleSheet(
+            f"color:{theme_color('text_muted')}; font-size:9pt; padding-left:56px;"
+        )
         self.cc_label.setWordWrap(True)
         h_layout.addWidget(self.cc_label)
 
@@ -139,15 +148,50 @@ class EmailView(QWidget):
         layout.addWidget(self.att_frame)
         self.att_frame.setVisible(False)
 
-        # Body viewer
+        # Body viewer. The message itself is rendered on a WHITE "page" even
+        # in dark mode — sender HTML usually assumes a light background (dark
+        # text on white), so forcing a dark bg here would make many emails
+        # unreadable. This mirrors Outlook / eM Client behavior.
         self.body_view = QTextBrowser()
         self.body_view.setOpenExternalLinks(True)
+        self.body_view.setStyleSheet(
+            "QTextBrowser { background:#ffffff; color:#201f1e; "
+            "border:none; padding:16px 20px; }"
+        )
         layout.addWidget(self.body_view, 1)
+
+    def apply_theme(self):
+        """Re-apply theme-dependent styling after a light/dark switch."""
+        self.header_frame.setStyleSheet(
+            f"QFrame {{ background: {theme_color('bg')}; "
+            f"border-bottom: 1px solid {theme_color('border')}; }}"
+        )
+        self.subject_label.setStyleSheet(f"color:{theme_color('text')};")
+        self.sender_name_label.setStyleSheet(f"color:{theme_color('text')};")
+        muted = f"color:{theme_color('text_muted')}; font-size:9pt;"
+        self.sender_email_label.setStyleSheet(muted)
+        self.recipients_label.setStyleSheet(muted)
+        self.date_label.setStyleSheet(muted)
+        self.cc_label.setStyleSheet(muted + " padding-left:56px;")
+        # If nothing is open, re-theme the empty body surface too.
+        if self.email is None:
+            self.body_view.setStyleSheet(
+                f"QTextBrowser {{ background:{theme_color('bg')}; "
+                f"color:{theme_color('text_muted')}; border:none; padding:16px 20px; }}"
+            )
 
     def show_empty(self):
         self.email = None
+        # Empty state: blend the body into the themed surface (in dark mode a
+        # bright white page with no content looks broken). A real message
+        # switches back to a white page in show_email().
+        self.body_view.setStyleSheet(
+            f"QTextBrowser {{ background:{theme_color('bg')}; "
+            f"color:{theme_color('text_muted')}; border:none; padding:16px 20px; }}"
+        )
         self.subject_label.setText(
-            "<span style='color:#a19f9d;'>Select an email to read</span>"
+            f"<span style='color:{theme_color('text_disabled')};'>"
+            "Select an email to read</span>"
         )
         self.subject_label.setTextFormat(Qt.RichText)
         self.avatar_label.setPixmap(QPixmap())
@@ -209,9 +253,33 @@ class EmailView(QWidget):
             self.att_list.addItem(item)
         self.att_frame.setVisible(bool(atts))
 
-        # Body: prefer HTML when available
+        # Body: prefer HTML when available. Switch back to a WHITE page for
+        # the actual message (sender HTML assumes a light background).
+        self.body_view.setStyleSheet(
+            "QTextBrowser { background:#ffffff; color:#201f1e; "
+            "border:none; padding:16px 20px; }"
+        )
         html = email.get("body_html")
         plain = email.get("body_plain") or ""
+        folder = (email.get("folder") or "").lower()
+        # Outbox rows re-purpose body_html to stash the raw MIME bytes
+        # (base64) so the sender worker can re-transmit the exact wire bytes.
+        # That base64 blob is NOT meant for display. Parse the raw MIME back
+        # into a proper HTML/plain body so a queued email looks exactly like
+        # it will when sent (formatted, with the signature) — not gibberish.
+        if folder == "outbox":
+            html = None
+            try:
+                from core import database as _db
+                from core.mail_parser import parse_message
+                raw = _db.get_outbox_raw(email["id"])
+                if raw:
+                    parsed, _atts = parse_message(raw)
+                    html = (parsed.get("body_html") or "").strip() or None
+                    if not html:
+                        plain = (parsed.get("body_plain") or "").strip() or plain
+            except Exception:
+                html = None  # fall back to stored plain text
         if html:
             self.body_view.setHtml(html)
         else:

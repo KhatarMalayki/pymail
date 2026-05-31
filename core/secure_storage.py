@@ -12,15 +12,13 @@ Key properties:
 - Falls back to plain-text storage on non-Windows so the rest of the app
   still works in dev mode on Linux/macOS.
 
-Storage location: alongside other config in ~/.pymail/secrets.dat
+Storage location: alongside other config in ~/.runlabmail/secrets.dat
 """
 import base64
 import json
 import sys
-from pathlib import Path
 
 from . import config
-
 
 SECRETS_FILE = config.DEFAULT_BASE / "secrets.dat"
 
@@ -96,8 +94,8 @@ def _dpapi_decrypt(ciphertext: bytes) -> bytes | None:
     except Exception:
         return None
 
-
 # ---------- Public API ----------
+
 
 def _read_store() -> dict:
     if not SECRETS_FILE.is_file():
@@ -149,7 +147,7 @@ def set_secret(key: str, value: str) -> None:
     _write_store(store)
 
 
-def get_secret(key: str, default: str = "") -> str:
+def get_secret(key: str, default: str="") -> str:
     """Retrieve a secret. Returns default if missing or decryption fails."""
     store = _read_store()
     entry = store.get(key)

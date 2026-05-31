@@ -10,11 +10,11 @@ with `wrangler login`, then every release is just:
 
 What this does:
     1. Bumps core/version.py
-    2. Builds dist/PyMail.exe (PyInstaller, single-file)
+    2. Builds dist/PyMail/ (PyInstaller, one-dir)
     3. Computes SHA256
     4. Generates dist/update_manifest.json
-    5. Uploads PyMail-{version}.exe and update_manifest.json to R2
-    6. Existing PyMail installs auto-detect the new version on next launch
+    5. Uploads PyMail-{version}.zip and update_manifest.json to R2
+    6. Existing RunLab Mail installs auto-detect the new version on next launch
 
 Configuration:
     R2_BUCKET and R2_PUBLIC_URL are read from .env (or defaults below).
@@ -27,6 +27,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -34,7 +36,7 @@ APP_NAME = "PyMail"
 
 # Defaults (override via .env)
 DEFAULT_R2_BUCKET = "pymail-releases"
-DEFAULT_R2_PUBLIC_URL = "https://pub-fbab08d87bad4965bfcade6e58bd1fa6.r2.dev"
+DEFAULT_R2_PUBLIC_URL = "https://update-runlabmail.runlab.my.id"
 
 # Read .env so secrets/config are not hardcoded
 env_file = ROOT / ".env"
@@ -67,6 +69,54 @@ def _wrangler_cmd():
 def run(cmd, **kw):
     print(f">>> {' '.join(str(c) for c in cmd)}")
     return subprocess.run(cmd, check=True, **kw)
+
+
+def _rmtree_retry(path: Path, retries: int=6, delay: float=0.6) -> None:
+    """Best-effort rmtree for Windows file locks (AV/indexer/transient)."""
+    if not path.exists():
+        return
+    last_err = None
+    for _ in range(retries):
+        try:
+            shutil.rmtree(path)
+            return
+        except PermissionError as e:
+            last_err = e
+            time.sleep(delay)
+    if last_err is not None:
+        raise last_err
+
+
+def _smoke_test_exe(exe_path: Path, seconds: int=4) -> None:
+    """Start the built EXE briefly to catch bootstrap/runtime corruption.
+
+    If the process exits immediately, release is aborted.
+    """
+    print(f">>> Smoke testing {exe_path.name} for {seconds}s...")
+    proc = subprocess.Popen([str(exe_path)])
+    try:
+        time.sleep(seconds)
+        code = proc.poll()
+        if code is not None:
+            raise RuntimeError(
+                f"Smoke test failed: {exe_path.name} exited early with code {code}."
+            )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+def _zip_dir(src_dir: Path, out_zip: Path) -> None:
+    if out_zip.exists():
+        out_zip.unlink()
+    with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for p in src_dir.rglob("*"):
+            if p.is_file():
+                zf.write(p, p.relative_to(src_dir.parent))
 
 
 def read_version() -> str:
@@ -182,13 +232,13 @@ def main():
         for d in ("build", "dist"):
             p = ROOT / d
             if p.exists():
-                shutil.rmtree(p)
+                _rmtree_retry(p)
         for f in ROOT.glob("*.spec"):
             f.unlink()
 
         pyi_args = [
             sys.executable, "-m", "PyInstaller",
-            "--noconfirm", "--clean", "--onefile",
+            "--noconfirm", "--clean", "--onedir",
             "--windowed",
             "--name", APP_NAME,
             "main.py",
@@ -201,23 +251,27 @@ def main():
             pyi_args += ["--add-data", f"{ROOT / 'resources'}{os.pathsep}resources"]
         run(pyi_args, cwd=ROOT)
 
-    out = ROOT / "dist" / f"{APP_NAME}.exe"
+    out = ROOT / "dist" / APP_NAME / f"{APP_NAME}.exe"
     if not out.is_file():
         print("ERROR: build output not found.")
         sys.exit(1)
 
-    versioned = out.with_name(f"{APP_NAME}-{version}.exe")
-    shutil.copy2(out, versioned)
-    sha = sha256_of(versioned)
-    size_mb = versioned.stat().st_size / 1024 / 1024
-    print(f"Built: {versioned.name} ({size_mb:.1f} MB)")
+    _smoke_test_exe(out)
+
+    package_zip = ROOT / "dist" / f"{APP_NAME}-{version}.zip"
+    _zip_dir(out.parent, package_zip)
+    sha = sha256_of(package_zip)
+    size_mb = package_zip.stat().st_size / 1024 / 1024
+    print(f"Built: {package_zip.name} ({size_mb:.1f} MB)")
     print(f"SHA256: {sha}")
 
-    download_url = f"{R2_PUBLIC_URL}/{APP_NAME}-{version}.exe"
+    download_url = f"{R2_PUBLIC_URL}/{APP_NAME}-{version}.zip"
     manifest = {
         "version": version,
         "url": download_url,
         "sha256": sha,
+        "package_type": "zip_onedir",
+        "entry_exe": f"{APP_NAME}.exe",
         "notes": args.notes or f"RunLab Mail {version}",
         "mandatory": args.mandatory,
     }
@@ -226,13 +280,18 @@ def main():
 
     print()
     print("Uploading to Cloudflare R2...")
-    # Order matters: upload .exe FIRST so manifest never points to a missing file
-    upload_to_r2(versioned, f"{APP_NAME}-{version}.exe", "application/octet-stream")
+    # Order matters: upload package FIRST so manifest never points to a missing file
+    upload_to_r2(package_zip, f"{APP_NAME}-{version}.zip", "application/zip")
     upload_to_r2(manifest_path, "update_manifest.json", "application/json")
 
-    # Note: old PyMail-*.exe binaries are auto-deleted after 90 days by the
-    # R2 lifecycle rule "auto-cleanup-old-binaries" (set up once during
-    # R2 migration). Manual delete: python admin/cleanup_releases.py delete <ver>
+    # ---- Keep R2 storage bounded: retain only the last KEEP_RELEASES zips ----
+    # Each release is ~45 MB; on a free 10 GB plan they pile up fast. We track
+    # what we've published in a local ledger and delete anything older than the
+    # newest KEEP_RELEASES. (The R2 lifecycle rule is a slower 14-day backstop.)
+    try:
+        _prune_old_releases(version)
+    except Exception as e:
+        print(f"  (retention prune skipped: {e})")
 
     print()
     print("=" * 60)
@@ -242,6 +301,55 @@ def main():
     print()
     print("Existing installs will auto-update on next launch.")
     print("=" * 60)
+
+
+# How many recent release zips to keep on R2 (older ones are deleted after
+# each successful publish). 3 = current + 2 previous for quick rollback.
+KEEP_RELEASES = 3
+RELEASE_LEDGER = ROOT / "admin" / "released_versions.json"
+
+
+def _prune_old_releases(current_version: str) -> None:
+    """Delete release zips older than the newest KEEP_RELEASES, using a local
+    ledger of versions we've published so we never guess at object keys."""
+    ledger = []
+    if RELEASE_LEDGER.is_file():
+        try:
+            ledger = json.loads(RELEASE_LEDGER.read_text(encoding="utf-8"))
+        except Exception:
+            ledger = []
+    if current_version not in ledger:
+        ledger.append(current_version)
+
+    # Sort newest-first by numeric version tuple.
+    def _vt(v):
+        out = []
+        for c in str(v).split("."):
+            try:
+                out.append(int(c))
+            except ValueError:
+                out.append(0)
+        return tuple(out)
+
+    ledger_sorted = sorted(set(ledger), key=_vt, reverse=True)
+    keep = ledger_sorted[:KEEP_RELEASES]
+    drop = ledger_sorted[KEEP_RELEASES:]
+
+    for v in drop:
+        key = f"{APP_NAME}-{v}.zip"
+        print(f"  Retention: deleting old release {key}")
+        try:
+            run([
+                _wrangler_cmd(), "r2", "object", "delete",
+                f"{R2_BUCKET}/{key}", "--remote",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass  # already gone / transient — lifecycle rule will catch it
+
+    # Ledger keeps only what we still retain on R2.
+    RELEASE_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    RELEASE_LEDGER.write_text(json.dumps(keep, indent=2), encoding="utf-8")
+    print(f"  Retention: keeping {keep}")
 
 
 if __name__ == "__main__":

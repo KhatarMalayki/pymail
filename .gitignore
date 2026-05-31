@@ -42,3 +42,13 @@ Thumbs.db
 *.db-shm
 *.db-wal
 debug_run.log
+
+# Build comparison / experiment artifacts (large, local-only)
+build_cmp/
+dist_cmp/
+
+# Personal/company signature export used for local testing (contains PII)
+signature.html
+
+# Local history snapshots
+.history/

@@ -13,6 +13,7 @@ from core import config
 
 
 class SettingsDialog(QDialog):
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("RunLab Mail Settings")
@@ -30,7 +31,7 @@ class SettingsDialog(QDialog):
         form = QVBoxLayout(gb)
         info = QLabel(
             "RunLab Mail stores all your accounts, emails, attachments, and "
-            "contacts in a single SQLite database (pymail.db). You can move "
+            "contacts in a single local database file. You can move "
             "it, point at a backup, or share it across PCs."
         )
         info.setWordWrap(True)
@@ -52,7 +53,7 @@ class SettingsDialog(QDialog):
         self.mode_group = QButtonGroup(self)
 
         self.mode_move = QRadioButton(
-            "&Move my data to a new folder (copy current pymail.db, then "
+            "&Move my data to a new folder (copy current data file, then "
             "switch to it)"
         )
         self.mode_move.setChecked(True)
@@ -60,7 +61,7 @@ class SettingsDialog(QDialog):
         form.addWidget(self.mode_move)
 
         self.mode_use_existing = QRadioButton(
-            "&Use the existing pymail.db in another folder (e.g. restore "
+            "&Use an existing data file in another folder (e.g. restore "
             "from a backup, share with another PC)"
         )
         self.mode_group.addButton(self.mode_use_existing, 2)
@@ -110,7 +111,7 @@ class SettingsDialog(QDialog):
     def _browse(self):
         current = self.target_edit.text() or str(config.get_data_dir())
         new_dir = QFileDialog.getExistingDirectory(
-            self, "Choose folder containing pymail.db (or a new empty folder)",
+            self, "Choose data folder (or a new empty folder)",
             current,
         )
         if new_dir:
@@ -126,13 +127,15 @@ class SettingsDialog(QDialog):
             return
 
         copy_existing = self.mode_move.isChecked()
-        # When using "Use existing", verify there's a pymail.db there
+        # When using "Use existing", verify there's a database file there
         if not copy_existing:
-            target_db = new_dir / "pymail.db"
+            target_db_new = new_dir / "runlabmail.db"
+            target_db_legacy = new_dir / "pymail.db"
+            target_db = target_db_new if target_db_new.is_file() else target_db_legacy
             if not target_db.is_file():
                 ret = QMessageBox.question(
-                    self, "No pymail.db found",
-                    f"There's no pymail.db in:\n  {new_dir}\n\n"
+                    self, "No data file found",
+                    f"No existing RunLab Mail data file was found in:\n  {new_dir}\n\n"
                     f"RunLab Mail will create a new empty database there. "
                     f"Your current data will remain untouched in:\n"
                     f"  {config.get_data_dir()}\n\n"

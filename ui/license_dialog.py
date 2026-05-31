@@ -108,12 +108,15 @@ class LicenseActivationDialog(QDialog):
 
 
 class LicenseInfoDialog(QDialog):
-    """Read-only dialog showing the current license info."""
+    """Read-only dialog showing the current license info, with an option to
+    enter/replace the license key manually (like Outlook / eM Client)."""
 
     def __init__(self, payload: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("About License")
-        self.resize(420, 240)
+        self.resize(460, 280)
+        self._payload = payload or {}
+        self._new_payload = None  # set if the user activates a new key
         layout = QVBoxLayout(self)
 
         rows = [
@@ -136,7 +139,32 @@ class LicenseInfoDialog(QDialog):
             row.addWidget(lv, 1)
             layout.addLayout(row)
 
+        layout.addStretch(1)
+
+        btn_row = QHBoxLayout()
+        enter_btn = QPushButton("Enter / replace license key...")
+        enter_btn.setToolTip(
+            "Paste a license key your administrator gave you to activate "
+            "or update this installation."
+        )
+        enter_btn.clicked.connect(self._enter_license)
+        btn_row.addWidget(enter_btn)
+        btn_row.addStretch(1)
         btn = QPushButton("Close")
         btn.clicked.connect(self.accept)
-        layout.addStretch(1)
-        layout.addWidget(btn)
+        btn_row.addWidget(btn)
+        layout.addLayout(btn_row)
+
+    def _enter_license(self):
+        """Open the activation dialog so the user can paste a new key. On
+        success, the new license is saved and this dialog reports it."""
+        dlg = LicenseActivationDialog(self)
+        # Pre-fill nothing; the user pastes their key. Reuse its activation.
+        if dlg.exec_() == QDialog.Accepted and dlg.payload:
+            self._new_payload = dlg.payload
+            QMessageBox.information(
+                self, "License updated",
+                "Your license has been updated. Some changes may take effect "
+                "after restarting RunLab Mail.",
+            )
+            self.accept()

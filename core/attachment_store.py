@@ -1,7 +1,7 @@
 """
 Content-addressed attachment storage.
 
-Files are stored on disk under ~/.pymail/attachments/<sha256-hex>.bin
+Files are stored on disk under ~/.runlabmail/attachments/<sha256-hex>.bin
 Each file is keyed by the SHA256 hash of its bytes — identical content is
 stored only once, no matter how many emails reference it.
 

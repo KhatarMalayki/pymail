@@ -1,4 +1,8 @@
 {
-  "_comment": "Place this file (renamed to pymail_update.json) next to PyMail.exe to override the default manifest URL without rebuilding the app. Useful for internal deployments.",
-  "manifest_url": "https://intranet.tunasgroup.com/pymail/update_manifest.json"
+  "_comment": "Place this file (renamed to pymail_update.json) next to PyMail.exe. The updater tries manifest_urls in order; manifest_url remains supported for backward compatibility.",
+  "manifest_urls": [
+    "https://update-runlabmail.runlab.my.id/update_manifest.json",
+    "https://pub-fbab08d87bad4965bfcade6e58bd1fa6.r2.dev/update_manifest.json"
+  ],
+  "manifest_url": "https://update-runlabmail.runlab.my.id/update_manifest.json"
 }

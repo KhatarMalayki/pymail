@@ -14,13 +14,32 @@ from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QInputDialog, QMenu, QLineEdit,
+    QInputDialog, QMenu, QLineEdit, QComboBox,
 )
 
 from core import license_client, config, secure_storage
 
 
+def _iso_to_local(ts: str) -> str:
+    """Convert ISO timestamp (UTC) to local time string."""
+    if not ts:
+        return ""
+    try:
+        # Parse ISO format (may have Z or +00:00)
+        ts = ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts)
+        # If no tzinfo, assume UTC
+        if dt.tzinfo is None:
+            from datetime import timezone
+            dt = dt.replace(tzinfo=timezone.utc)
+        # Convert to local
+        local_dt = dt.astimezone()
+        return local_dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return ts[:16].replace("T", " ")  # fallback
+
 # ---------- Background workers ----------
+
 
 class _ListWorker(QThread):
     loaded = pyqtSignal(list)
@@ -72,14 +91,23 @@ class _SimpleWorker(QThread):
         except Exception as e:
             self.failed.emit(str(e))
 
-
 # ---------- Main dialog ----------
 
+
 class LicenseManagerDialog(QDialog):
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("RunLab Mail License Manager (Admin)")
         self.resize(1080, 580)
+        # Allow maximize / fullscreen so the admin can see all columns
+        # without resizing the window manually.
+        from PyQt5.QtCore import Qt as _Qt
+        self.setWindowFlags(
+            self.windowFlags()
+            | _Qt.WindowMaximizeButtonHint
+            | _Qt.WindowMinimizeButtonHint
+        )
         self._users: list[dict] = []
         # Migrate any plain-text token from older versions (one-time)
         secure_storage.migrate_from_config("admin_token")
@@ -114,17 +142,38 @@ class LicenseManagerDialog(QDialog):
         self.refresh_btn.clicked.connect(self._load)
         btn_row.addWidget(self.refresh_btn)
 
+        self.push_ver_btn = QPushButton("🚀  Push version to all users")
+        self.push_ver_btn.setToolTip(
+            "Set the allowed update version for every registered user.\n"
+            "Users will only receive the update once you push it here."
+        )
+        self.push_ver_btn.clicked.connect(self._push_version)
+        btn_row.addWidget(self.push_ver_btn)
+
         btn_row.addStretch(1)
+        
+        # Search box
+        search_label = QLabel("🔍")
+        search_label.setStyleSheet("font-size: 14px;")
+        btn_row.addWidget(search_label)
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search email, name, hostname, license...")
+        self.search_edit.setMinimumWidth(250)
+        self.search_edit.setMaximumWidth(350)
+        self.search_edit.textChanged.connect(self._on_search_changed)
+        btn_row.addWidget(self.search_edit)
+        
         self.token_btn = QPushButton("🔑  Change admin token")
         self.token_btn.clicked.connect(self._prompt_for_token)
         btn_row.addWidget(self.token_btn)
         layout.addLayout(btn_row)
 
         # Table
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 11)
         self.table.setHorizontalHeaderLabels([
             "License ID", "Status", "Email", "Name",
-            "Hostname", "Issued", "Expires", "Last seen",
+            "Hostname", "Version", "Allowed Ver.", "Machine ID",
+            "Issued", "Expires", "Last seen",
         ])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -135,26 +184,68 @@ class LicenseManagerDialog(QDialog):
             lambda _: self._copy_selected_id()
         )
         h = self.table.horizontalHeader()
-        h.setSectionResizeMode(0, QHeaderView.Interactive)
-        h.setSectionResizeMode(1, QHeaderView.Interactive)
-        h.setSectionResizeMode(2, QHeaderView.Stretch)
-        h.setSectionResizeMode(3, QHeaderView.Stretch)
-        h.setSectionResizeMode(4, QHeaderView.Interactive)
-        h.setSectionResizeMode(5, QHeaderView.Interactive)
-        h.setSectionResizeMode(6, QHeaderView.Interactive)
-        h.setSectionResizeMode(7, QHeaderView.Interactive)
-        self.table.setColumnWidth(0, 110)
-        self.table.setColumnWidth(1, 80)
-        self.table.setColumnWidth(4, 130)
-        self.table.setColumnWidth(5, 90)
-        self.table.setColumnWidth(6, 90)
-        self.table.setColumnWidth(7, 100)
+        # Auto-size most columns to their content so the admin never has to
+        # drag column borders. Email & Name stretch to fill leftover space.
+        from PyQt5.QtWidgets import QHeaderView as _QHV
+        h.setSectionResizeMode(0, _QHV.ResizeToContents)   # License ID
+        h.setSectionResizeMode(1, _QHV.ResizeToContents)   # Status
+        h.setSectionResizeMode(2, _QHV.Stretch)            # Email (fill)
+        h.setSectionResizeMode(3, _QHV.Stretch)            # Name (fill)
+        h.setSectionResizeMode(4, _QHV.ResizeToContents)   # Hostname
+        h.setSectionResizeMode(5, _QHV.ResizeToContents)   # Version
+        h.setSectionResizeMode(6, _QHV.ResizeToContents)   # Allowed Ver.
+        h.setSectionResizeMode(7, _QHV.ResizeToContents)   # Machine ID
+        h.setSectionResizeMode(8, _QHV.ResizeToContents)   # Issued
+        h.setSectionResizeMode(9, _QHV.ResizeToContents)   # Expires
+        h.setSectionResizeMode(10, _QHV.ResizeToContents)  # Last seen
+        # Let the user still drag to override if they want.
+        h.setStretchLastSection(False)
+        # Click a column header to sort by that column (toggles asc/desc).
+        # We sort the underlying data ourselves (typed: dates/versions/status)
+        # and re-render, so sorting works correctly across pagination.
+        h.setSectionsClickable(True)
+        h.sectionClicked.connect(self._on_header_clicked)
+        self._sort_column = None   # None = default status/last-seen ordering
+        self._sort_desc = False
         layout.addWidget(self.table, 1)
 
         # Status bar
         self.status_label = QLabel("Ready")
         self.status_label.setStyleSheet("color:#605e5c;")
         layout.addWidget(self.status_label)
+
+        # Pagination controls
+        self._page_size = 50  # default items per page
+        self._current_page = 0
+        self._total_pages = 1
+        self._all_users = []  # store all users for pagination
+        self._search_filter = ""  # search filter text
+
+        page_layout = QHBoxLayout()
+        page_layout.addWidget(QLabel("Items per page:"))
+        self.page_size_combo = QComboBox()
+        self.page_size_combo.addItems(["25", "50", "100", "200", "All"])
+        self.page_size_combo.setCurrentIndex(1)  # 50
+        self.page_size_combo.currentIndexChanged.connect(self._on_page_size_changed)
+        page_layout.addWidget(self.page_size_combo)
+        page_layout.addSpacing(20)
+
+        self.page_label = QLabel("Page 1 of 1")
+        page_layout.addWidget(self.page_label)
+        page_layout.addSpacing(10)
+
+        self.prev_btn = QPushButton("← Previous")
+        self.prev_btn.setEnabled(False)
+        self.prev_btn.clicked.connect(self._prev_page)
+        page_layout.addWidget(self.prev_btn)
+
+        self.next_btn = QPushButton("Next →")
+        self.next_btn.setEnabled(False)
+        self.next_btn.clicked.connect(self._next_page)
+        page_layout.addWidget(self.next_btn)
+
+        page_layout.addStretch(1)
+        layout.addLayout(page_layout)
 
         bottom = QHBoxLayout()
         bottom.addStretch(1)
@@ -196,8 +287,17 @@ class LicenseManagerDialog(QDialog):
         self._loader.failed.connect(self._on_load_failed)
         self._loader.start()
 
+    def _on_search_changed(self, text: str):
+        self._search_filter = text.lower().strip()
+        self._current_page = 0
+        self._update_pagination()
+        self._render_table()
+    
     def _on_users_loaded(self, users: list):
-        self._users = users
+        self._all_users = users  # store all for pagination
+        self._search_filter = ""  # reset search on refresh
+        self._current_page = 0
+        self._update_pagination()
         self._render_table()
         revoked = sum(1 for u in users if u.get("status") == "revoked")
         expired = sum(1 for u in users if u.get("status") == "expired")
@@ -213,6 +313,58 @@ class LicenseManagerDialog(QDialog):
         # admin's pre-Worker / offline-issued licenses get into the
         # registry.
         self._maybe_offer_sync(users)
+
+    def _get_filtered_users(self):
+        """Return users filtered by search text."""
+        if not self._search_filter:
+            return self._all_users
+        filt = self._search_filter
+        return [
+            u for u in self._all_users
+            if filt in (u.get("email") or "").lower()
+            or filt in (u.get("name") or "").lower()
+            or filt in (u.get("hostname") or "").lower()
+            or filt in (u.get("license_id") or "").lower()
+            or filt in (u.get("machine_id") or "").lower()
+        ]
+    
+    def _update_pagination(self):
+        """Recalculate total pages based on current page size and data."""
+        total = len(self._get_filtered_users())
+        if self._page_size == 0:  # All
+            self._total_pages = 1
+        else:
+            self._total_pages = max(1, (total + self._page_size - 1) // self._page_size)
+        # Clamp current page
+        self._current_page = min(self._current_page, self._total_pages - 1)
+        self.page_label.setText(f"Page {self._current_page + 1} of {self._total_pages}")
+        self.prev_btn.setEnabled(self._current_page > 0)
+        self.next_btn.setEnabled(self._current_page < self._total_pages - 1)
+
+    def _prev_page(self):
+        if self._current_page > 0:
+            self._current_page -= 1
+            self._update_pagination()
+            self._render_table()
+
+    def _next_page(self):
+        if self._current_page < self._total_pages - 1:
+            self._current_page += 1
+            self._update_pagination()
+            self._render_table()
+
+    def _on_page_size_changed(self, index: int):
+        text = self.page_size_combo.currentText()
+        if text == "All":
+            self._page_size = 0
+        else:
+            try:
+                self._page_size = int(text)
+            except ValueError:
+                self._page_size = 50
+        self._current_page = 0
+        self._update_pagination()
+        self._render_table()
 
     def _maybe_offer_sync(self, server_users: list):
         """Detect locally-issued licenses missing from the Worker and
@@ -241,13 +393,13 @@ class LicenseManagerDialog(QDialog):
             "Sync local licenses?",
             f"Found {len(missing)} license(s) issued locally that aren't "
             f"in the Worker registry:\n\n"
-            + "\n".join(
+            +"\n".join(
                 f"  • {p.get('name') or '(no name)'} <{p.get('email') or ''}>  "
                 f"({p['license_id']})"
                 for p in missing[:10]
             )
-            + ("\n  ..." if len(missing) > 10 else "")
-            + "\n\nImport them now so they appear in the License Manager?",
+            +("\n  ..." if len(missing) > 10 else "")
+            +"\n\nImport them now so they appear in the License Manager?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
@@ -275,6 +427,70 @@ class LicenseManagerDialog(QDialog):
         self.status_label.setText(msg)
         self._load()  # refresh table
 
+    def _push_version(self):
+        from core.version import __version__
+        ver, ok = QInputDialog.getText(
+            self, "Push version to all users",
+            "Enter the version to allow (e.g. 1.2.38).\n\n"
+            "Users will only see and auto-install the update\n"
+            "after you push it here.",
+            QLineEdit.Normal,
+            __version__,
+        )
+        if not ok or not ver.strip():
+            return
+        ver = ver.strip()
+        self.push_ver_btn.setEnabled(False)
+        self.status_label.setText(f"Pushing v{ver} to all users...")
+
+        def _do():
+            license_client.admin_push_version(self._token, ver)
+
+        self._push_worker = _SimpleWorker(_do)
+        self._push_worker.done.connect(lambda: self._on_push_done(ver))
+        self._push_worker.failed.connect(self._on_push_failed)
+        self._push_worker.start()
+
+    def _on_push_done(self, ver: str):
+        self.push_ver_btn.setEnabled(True)
+        self.status_label.setText(f"✓ Version {ver} pushed to all users.")
+        QMessageBox.information(
+            self, "Version pushed",
+            f"All registered users are now allowed to update to v{ver}.\n\n"
+            f"They will receive the update on next launch.",
+        )
+
+    def _on_push_failed(self, err: str):
+        self.push_ver_btn.setEnabled(True)
+        self.status_label.setText(f"Push failed: {err}")
+        QMessageBox.critical(self, "Push failed", err)
+
+    def _push_version_single(self, license_id: str, name: str):
+        from core.version import __version__
+        ver, ok = QInputDialog.getText(
+            self, f"Push version to {name}",
+            f"Enter the version to allow for {name} ({license_id}):",
+            QLineEdit.Normal,
+            __version__,
+        )
+        if not ok or not ver.strip():
+            return
+        ver = ver.strip()
+        self.status_label.setText(f"Pushing v{ver} to {name}...")
+
+        def _do():
+            license_client.admin_push_version_single(
+                self._token, license_id, ver
+            )
+
+        w = _SimpleWorker(_do)
+        w.done.connect(lambda: self._on_action_done(
+            f"v{ver} pushed to {name}"
+        ))
+        w.failed.connect(self._on_action_failed)
+        w.start()
+        self._action_worker = w
+
     def _on_load_failed(self, err: str):
         self.status_label.setText(f"Failed: {err}")
         self.refresh_btn.setEnabled(True)
@@ -289,28 +505,84 @@ class LicenseManagerDialog(QDialog):
             if ret == QMessageBox.Yes:
                 self._prompt_for_token()
 
+    def _on_header_clicked(self, col: int):
+        """Sort by the clicked column. Clicking the same column again toggles
+        ascending/descending. Re-renders from page 1."""
+        from PyQt5.QtCore import Qt as _Qt
+        if self._sort_column == col:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_column = col
+            self._sort_desc = False
+        # Show the sort indicator arrow on the header.
+        try:
+            self.table.horizontalHeader().setSortIndicatorShown(True)
+            self.table.horizontalHeader().setSortIndicator(
+                col, _Qt.DescendingOrder if self._sort_desc else _Qt.AscendingOrder
+            )
+        except Exception:
+            pass
+        self._current_page = 0
+        self._update_pagination()
+        self._render_table()
+
     def _render_table(self):
         self.table.setRowCount(0)
-        # Sort: revoked/expired at the bottom, active at top by last_seen
-        def _sort_key(u):
-            order = {"active": 0, "expired": 1, "revoked": 2}.get(
-                u.get("status", "active"), 3
-            )
-            return (order, u.get("last_seen") or "")
-        sorted_users = sorted(self._users, key=_sort_key, reverse=False)
-        # Within each group, latest last_seen first
-        sorted_users.sort(
-            key=lambda u: (
-                {"active": 0, "expired": 1, "revoked": 2}.get(
-                    u.get("status", "active"), 3
-                ),
-                -1 * (
-                    int(_iso_to_ts(u.get("last_seen") or ""))
-                ),
-            )
-        )
 
-        for u in sorted_users:
+        # Apply search filter
+        filtered_users = self._get_filtered_users()
+
+        if self._sort_column is None:
+            # Default ordering: active first, then expired/revoked; within
+            # each group, most-recently-seen first.
+            def _grp(u):
+                return {"active": 0, "expired": 1, "revoked": 2}.get(
+                    u.get("status", "active"), 3
+                )
+            sorted_users = sorted(
+                filtered_users,
+                key=lambda u: (_grp(u), -1 * int(_iso_to_ts(u.get("last_seen") or ""))),
+            )
+        else:
+            # Column-click sorting with type-aware keys.
+            col = self._sort_column
+
+            def _key(u):
+                if col == 0:   # License ID
+                    return (u.get("license_id") or "").lower()
+                if col == 1:   # Status
+                    return (u.get("status") or "").lower()
+                if col == 2:   # Email
+                    return (u.get("email") or "").lower()
+                if col == 3:   # Name
+                    return (u.get("name") or "").lower()
+                if col == 4:   # Hostname
+                    return (u.get("hostname") or "").lower()
+                if col == 5:   # Version
+                    return _version_key(u.get("version") or "")
+                if col == 6:   # Allowed Ver.
+                    return _version_key(u.get("allowed_version") or "")
+                if col == 7:   # Machine ID
+                    return (u.get("machine_id") or "").lower()
+                if col == 8:   # Issued
+                    return _iso_to_ts(u.get("issued_at") or "")
+                if col == 9:   # Expires (perpetual sorts last when asc)
+                    exp = u.get("expires_at") or ""
+                    return _iso_to_ts(exp) if exp else float("inf")
+                if col == 10:  # Last seen
+                    return _iso_to_ts(u.get("last_seen") or "")
+                return ""
+            sorted_users = sorted(filtered_users, key=_key, reverse=self._sort_desc)
+
+        # Pagination slice
+        if self._page_size > 0:
+            start = self._current_page * self._page_size
+            end = start + self._page_size
+            page_users = sorted_users[start:end]
+        else:
+            page_users = sorted_users
+
+        for u in page_users:
             row = self.table.rowCount()
             self.table.insertRow(row)
             status = u.get("status", "active")
@@ -326,9 +598,12 @@ class LicenseManagerDialog(QDialog):
                 u.get("email") or "",
                 u.get("name") or "",
                 u.get("hostname") or "",
+                u.get("version") or "",
+                u.get("allowed_version") or "(all)",
+                u.get("machine_id") or "",
                 (u.get("issued_at") or "")[:10],
                 (u.get("expires_at") or "(perpetual)")[:10],
-                (u.get("last_seen") or "")[:16].replace("T", " "),
+                _iso_to_local(u.get("last_seen") or ""),
             ]
             for c, value in enumerate(cells):
                 item = QTableWidgetItem(value)
@@ -382,6 +657,11 @@ class LicenseManagerDialog(QDialog):
                 "🚫  Revoke license...",
                 lambda: self._revoke(license_id, name),
             )
+        menu.addSeparator()
+        menu.addAction(
+            "🚀  Push specific version to this user...",
+            lambda: self._push_version_single(license_id, name),
+        )
         menu.addSeparator()
         menu.addAction(
             "🗑  Delete (remove from registry permanently)",
@@ -508,3 +788,20 @@ def _iso_to_ts(iso: str) -> float:
         return dt.timestamp()
     except Exception:
         return 0
+
+
+def _version_key(v: str) -> tuple:
+    """Turn a version string like '1.2.59' into a tuple of ints for correct
+    numeric sorting (so 1.2.10 sorts after 1.2.9, not before). Non-numeric
+    or empty values (e.g. '(all)') sort first."""
+    if not v:
+        return (-1,)
+    parts = []
+    for chunk in str(v).strip().split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            # Non-numeric component (e.g. "(all)") — sort lowest.
+            return (-1,)
+    return tuple(parts) if parts else (-1,)
+

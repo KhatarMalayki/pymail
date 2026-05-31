@@ -13,6 +13,7 @@ from core import imap_client
 
 
 class AccountDialog(QDialog):
+
     def __init__(self, parent=None, account=None):
         super().__init__(parent)
         self.account = account
@@ -67,6 +68,26 @@ class AccountDialog(QDialog):
         )
         leave_hint.setTextFormat(Qt.RichText)
         leave_hint.setWordWrap(True)
+
+        self.pop_timeout = QSpinBox()
+        self.pop_timeout.setRange(10, 600)
+        self.pop_timeout.setValue(120)
+        self.pop_timeout.setSuffix(" seconds")
+        self.pop_timeout.setToolTip(
+            "How long to wait for the server to respond before retrying.\n"
+            "Increase this if your connection is slow or messages are large."
+        )
+
+        self.pop_max_size = QSpinBox()
+        self.pop_max_size.setRange(0, 500)
+        self.pop_max_size.setValue(20)
+        self.pop_max_size.setSuffix(" MB")
+        self.pop_max_size.setSpecialValueText("No limit")
+        self.pop_max_size.setToolTip(
+            "Messages larger than this size will be skipped during download.\n"
+            "0 = no limit. Recommended: 20 MB."
+        )
+
         self.pop_test_btn = QPushButton("Test POP3")
         self.pop_test_btn.clicked.connect(self._test_pop)
 
@@ -77,6 +98,8 @@ class AccountDialog(QDialog):
         pform.addRow("Password:", self.pop_pass)
         pform.addRow("", self.leave_on_server)
         pform.addRow("", leave_hint)
+        pform.addRow("Socket timeout:", self.pop_timeout)
+        pform.addRow("Skip messages larger than:", self.pop_max_size)
         pform.addRow("", self.pop_test_btn)
         tabs.addTab(pop_tab, "Incoming (POP3)")
 
@@ -105,9 +128,17 @@ class AccountDialog(QDialog):
         sform.addRow("Server:", self.smtp_host)
         sform.addRow("Port:", self.smtp_port)
         sform.addRow("Security:", self.smtp_security)
+        self.send_immediately = QCheckBox("Send email immediately (skip Outbox queue)")
+        self.send_immediately.setToolTip(
+            "ON: email is sent right when you click Send.\n"
+            "OFF (default): email is placed in Outbox first and sent "
+            "during the next Send/Receive cycle."
+        )
+
         sform.addRow("", self.same_as_pop)
         sform.addRow("Username:", self.smtp_user)
         sform.addRow("Password:", self.smtp_pass)
+        sform.addRow("", self.send_immediately)
         sform.addRow("", self.smtp_test_btn)
         tabs.addTab(smtp_tab, "Outgoing (SMTP)")
 
@@ -342,6 +373,8 @@ class AccountDialog(QDialog):
         self.pop_user.setText(a.get("pop3_user") or "")
         self.pop_pass.setText(a.get("pop3_password") or "")
         self.leave_on_server.setChecked(bool(a.get("leave_on_server")))
+        self.pop_timeout.setValue(int(a.get("pop3_timeout") or 120))
+        self.pop_max_size.setValue(int((a.get("max_email_bytes") or 20 * 1024 * 1024) // (1024 * 1024)))
         self.smtp_host.setText(a.get("smtp_host") or "")
         self.smtp_port.setValue(int(a.get("smtp_port") or 465))
         idx = self.smtp_security.findText((a.get("smtp_security") or "SSL").upper())
@@ -349,6 +382,7 @@ class AccountDialog(QDialog):
             self.smtp_security.setCurrentIndex(idx)
         self.smtp_user.setText(a.get("smtp_user") or "")
         self.smtp_pass.setText(a.get("smtp_password") or "")
+        self.send_immediately.setChecked(bool(a.get("send_immediately")))
         # Signature: stored as HTML; if it looks like plain text, treat it as such
         sig = a.get("signature") or ""
         if "<" in sig and ">" in sig:
@@ -396,11 +430,14 @@ class AccountDialog(QDialog):
             "pop3_user": self.pop_user.text().strip() or email,
             "pop3_password": self.pop_pass.text(),
             "leave_on_server": 1 if self.leave_on_server.isChecked() else 0,
+            "pop3_timeout": self.pop_timeout.value(),
+            "max_email_bytes": self.pop_max_size.value() * 1024 * 1024 if self.pop_max_size.value() > 0 else 0,
             "smtp_host": self.smtp_host.text().strip(),
             "smtp_port": self.smtp_port.value(),
             "smtp_security": self.smtp_security.currentText(),
             "smtp_user": self.smtp_user.text().strip() or email,
             "smtp_password": self.smtp_pass.text(),
+            "send_immediately": 1 if self.send_immediately.isChecked() else 0,
             "signature": signature,
             "imap_enabled": 1 if self.imap_enabled.isChecked() else 0,
             "imap_host": self.imap_host.text().strip(),

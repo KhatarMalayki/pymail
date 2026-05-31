@@ -18,22 +18,25 @@ style="font-family:'Segoe UI',sans-serif;border-collapse:collapse;">
   <tr>
     <td style="padding:0 12px 4px 0;vertical-align:top;">
       <p style="margin:0;font-size:12pt;color:#1f497d;">\
-<b>{name}</b></p>
-      <p style="margin:0;font-size:10pt;color:#000;">{role}</p>
+<b>{name}</b> &nbsp;|&nbsp; <span style="font-size:10pt;color:#000;\
+font-weight:normal;">{role}</span></p>
       <p style="margin:6px 0 0 0;font-size:10pt;color:#000;">\
 Tel : {phone}</p>
       <p style="margin:0;font-size:10pt;color:#000;">\
 Fax : 021-7486 5000</p>
     </td>
-    <td style="padding:0 0 4px 12px;vertical-align:middle;\
-border-left:1px solid #e1dfdd;">
+    <td style="padding:0 0 4px 12px;vertical-align:middle;">
       <img src="https://raw.githubusercontent.com/KhatarMalayki/icontunas/\
 master/ICON/TUNASRENT-LOGO_fix.png" alt="Tunas Rent" \
 width="268" style="max-width:268px;height:auto;display:block;">
     </td>
   </tr>
 </table>
-<p style="margin:8px 0 0 0;border-top:2px solid #230299;width:330px;">&nbsp;</p>
+<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:8px 0 0 0;">
+  <tr>
+    <td width="330" style="border-top:2px solid #230299;font-size:0;line-height:0;">&nbsp;</td>
+  </tr>
+</table>
 <table cellpadding="0" cellspacing="0" \
 style="font-family:'Segoe UI',sans-serif;border-collapse:collapse;\
 margin-top:6px;">
@@ -75,10 +78,10 @@ style="height:13px;border:0;vertical-align:middle;"></a>
 """
 
 
-def render_tunas(name: str, role: str = "IT Operational",
-                 phone: str = "021-7486 1000",
-                 email: str = "khatar@tunasgroup.com",
-                 address: str = "Bintaro Komersial CBD B7 Kavling A1/02, "
+def render_tunas(name: str, role: str="IT Operational",
+                 phone: str="021-7486 1000",
+                 email: str="khatar@tunasgroup.com",
+                 address: str="Bintaro Komersial CBD B7 Kavling A1/02, "
                                 "Bintaro Jaya, Tangerang 15224") -> str:
     """Render the Tunas template with user-specific fields filled in."""
     return TUNAS_TEMPLATE.format(

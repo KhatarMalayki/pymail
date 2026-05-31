@@ -26,6 +26,11 @@
  *   POST /admin/restore   (admin auth required)
  *     Body: {license_id}
  *
+ *   POST /admin/push-version  (admin auth required)
+ *     Body: {version}          // e.g. "1.2.38"
+ *     Effect: sets allowed_version on every active user record.
+ *             Clients only auto-update when their allowed_version > current.
+ *
  * Storage layout in R2 bucket:
  *     users.json            { users: [...] }   - canonical user list
  *     revoked.json          { revoked: [...] } - existing blacklist (kept for compat)
@@ -42,44 +47,50 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    if (request.method === 'OPTIONS') {
+    if (request.method === "OPTIONS") {
       return cors(new Response(null, { status: 204 }));
     }
 
     try {
-      if (path === '/register' && request.method === 'POST') {
+      if (path === "/register" && request.method === "POST") {
         return cors(await handleRegister(request, env));
       }
-      if (path === '/verify' && request.method === 'POST') {
+      if (path === "/verify" && request.method === "POST") {
         return cors(await handleVerify(request, env));
       }
-      if (path.startsWith('/admin/')) {
+      if (path.startsWith("/admin/")) {
         const ok = await checkAdmin(request, env);
         if (!ok) {
-          return cors(json({ error: 'Forbidden' }, 403));
+          return cors(json({ error: "Forbidden" }, 403));
         }
-        if (path === '/admin/list' && request.method === 'POST') {
+        if (path === "/admin/list" && request.method === "POST") {
           return cors(await handleAdminList(env));
         }
-        if (path === '/admin/extend' && request.method === 'POST') {
+        if (path === "/admin/extend" && request.method === "POST") {
           return cors(await handleAdminExtend(request, env));
         }
-        if (path === '/admin/revoke' && request.method === 'POST') {
+        if (path === "/admin/revoke" && request.method === "POST") {
           return cors(await handleAdminRevoke(request, env));
         }
-        if (path === '/admin/restore' && request.method === 'POST') {
+        if (path === "/admin/restore" && request.method === "POST") {
           return cors(await handleAdminRestore(request, env));
         }
-        if (path === '/admin/import' && request.method === 'POST') {
+        if (path === "/admin/import" && request.method === "POST") {
           return cors(await handleAdminImport(request, env));
         }
-        if (path === '/admin/delete' && request.method === 'POST') {
+        if (path === "/admin/delete" && request.method === "POST") {
           return cors(await handleAdminDelete(request, env));
         }
+        if (path === "/admin/push-version" && request.method === "POST") {
+          return cors(await handleAdminPushVersion(request, env));
+        }
+        if (path === "/admin/update-user" && request.method === "POST") {
+          return cors(await handleAdminUpdateUser(request, env));
+        }
       }
-      return cors(json({ error: 'Not found', path }, 404));
+      return cors(json({ error: "Not found", path }, 404));
     } catch (e) {
-      return cors(json({ error: String(e && e.message || e) }, 500));
+      return cors(json({ error: String((e && e.message) || e) }, 500));
     }
   },
 };
@@ -87,20 +98,20 @@ export default {
 // ---------- CORS / JSON helpers ----------
 function cors(resp) {
   const h = new Headers(resp.headers);
-  h.set('Access-Control-Allow-Origin', '*');
-  h.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  h.set('Access-Control-Allow-Headers', 'Content-Type, X-Admin-Token');
+  h.set("Access-Control-Allow-Origin", "*");
+  h.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  h.set("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token");
   return new Response(resp.body, { status: resp.status, headers: h });
 }
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { "Content-Type": "application/json" },
   });
 }
 
 async function checkAdmin(request, env) {
-  const token = request.headers.get('X-Admin-Token') || '';
+  const token = request.headers.get("X-Admin-Token") || "";
   if (!env.ADMIN_TOKEN) return false;
   return token === env.ADMIN_TOKEN;
 }
@@ -108,7 +119,7 @@ async function checkAdmin(request, env) {
 // ---------- Storage helpers (R2) ----------
 async function loadUsers(env) {
   try {
-    const obj = await env.BUCKET.get('users.json');
+    const obj = await env.BUCKET.get("users.json");
     if (!obj) return { users: [] };
     const text = await obj.text();
     return JSON.parse(text);
@@ -117,13 +128,13 @@ async function loadUsers(env) {
   }
 }
 async function saveUsers(env, data) {
-  await env.BUCKET.put('users.json', JSON.stringify(data, null, 2), {
-    httpMetadata: { contentType: 'application/json' },
+  await env.BUCKET.put("users.json", JSON.stringify(data, null, 2), {
+    httpMetadata: { contentType: "application/json" },
   });
 }
 async function loadRevoked(env) {
   try {
-    const obj = await env.BUCKET.get('revoked.json');
+    const obj = await env.BUCKET.get("revoked.json");
     if (!obj) return { revoked: [], notes: {} };
     return JSON.parse(await obj.text());
   } catch {
@@ -131,8 +142,8 @@ async function loadRevoked(env) {
   }
 }
 async function saveRevoked(env, data) {
-  await env.BUCKET.put('revoked.json', JSON.stringify(data, null, 2), {
-    httpMetadata: { contentType: 'application/json' },
+  await env.BUCKET.put("revoked.json", JSON.stringify(data, null, 2), {
+    httpMetadata: { contentType: "application/json" },
   });
 }
 
@@ -141,18 +152,18 @@ async function signPayload(payload, env) {
   // Private key is stored as a base64 PKCS8 string in env.PRIVATE_KEY_PKCS8
   // Decode and import as a CryptoKey.
   const keyB64 = env.PRIVATE_KEY_PKCS8;
-  if (!keyB64) throw new Error('PRIVATE_KEY_PKCS8 secret is not set');
+  if (!keyB64) throw new Error("PRIVATE_KEY_PKCS8 secret is not set");
   const keyBytes = base64Decode(keyB64);
   const key = await crypto.subtle.importKey(
-    'pkcs8',
+    "pkcs8",
     keyBytes,
-    { name: 'Ed25519' },
+    { name: "Ed25519" },
     false,
-    ['sign'],
+    ["sign"],
   );
   // Canonical JSON (sorted keys, no whitespace) — same as Python signer
   const canonical = canonicalJson(payload);
-  const sigBuf = await crypto.subtle.sign('Ed25519', key, canonical);
+  const sigBuf = await crypto.subtle.sign("Ed25519", key, canonical);
   return base64Encode(new Uint8Array(sigBuf));
 }
 
@@ -165,10 +176,10 @@ function canonicalJson(obj) {
 function sortKeys(obj) {
   // Replacer function for JSON.stringify to enforce sorted keys at every
   // object level, matching Python's json.dumps(sort_keys=True).
-  if (obj === null || typeof obj !== 'object') return undefined;
+  if (obj === null || typeof obj !== "object") return undefined;
   const keys = Object.keys(obj).sort();
   return (key, value) => {
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
       return value;
     }
     const sorted = {};
@@ -178,12 +189,12 @@ function sortKeys(obj) {
 }
 
 function base64Encode(bytes) {
-  let bin = '';
+  let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
 }
 function base64Decode(s) {
-  const bin = atob(s.replace(/\s+/g, ''));
+  const bin = atob(s.replace(/\s+/g, ""));
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
@@ -199,18 +210,20 @@ function newLicenseId() {
   // 11-char URL-safe random ID, matching Python admin's secrets.token_urlsafe(8)
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
-  let s = base64Encode(bytes).replace(/\+/g, '-').replace(/\//g, '_');
-  return s.replace(/=+$/, '');
+  let s = base64Encode(bytes).replace(/\+/g, "-").replace(/\//g, "_");
+  return s.replace(/=+$/, "");
 }
 
 // ---------- Endpoints ----------
 
 async function handleRegister(request, env) {
   const body = await request.json().catch(() => ({}));
-  const machineId = String(body.machine_id || '').trim();
-  const email = String(body.email || '').trim().toLowerCase();
-  if (!machineId || !email || !email.includes('@')) {
-    return json({ error: 'machine_id and email are required' }, 400);
+  const machineId = String(body.machine_id || "").trim();
+  const email = String(body.email || "")
+    .trim()
+    .toLowerCase();
+  if (!machineId || !email || !email.includes("@")) {
+    return json({ error: "machine_id and email are required" }, 400);
   }
 
   const data = await loadUsers(env);
@@ -227,16 +240,16 @@ async function handleRegister(request, env) {
       license_id: newLicenseId(),
       machine_id: machineId,
       email,
-      name: String(body.name || '').trim(),
-      hostname: String(body.hostname || '').trim(),
-      os_user: String(body.os_user || '').trim(),
-      version: String(body.version || '').trim(),
+      name: String(body.name || "").trim(),
+      hostname: String(body.hostname || "").trim(),
+      os_user: String(body.os_user || "").trim(),
+      version: String(body.version || "").trim(),
       issued_at: now.toISOString(),
       expires_at: expiresAt.toISOString(),
       first_seen: now.toISOString(),
       last_seen: now.toISOString(),
-      status: 'active',
-      note: 'auto-trial on first run',
+      status: "active",
+      note: "auto-trial on first run",
     };
     data.users.push(user);
   } else {
@@ -254,12 +267,12 @@ async function handleRegister(request, env) {
   // Build & sign the license payload (same shape as the Python admin issuer)
   const payload = {
     license_id: user.license_id,
-    name: user.name || '',
+    name: user.name || "",
     email: user.email,
     issued_at: user.issued_at,
-    expires_at: user.expires_at || '',
+    expires_at: user.expires_at || "",
     machine_id_hash: user.machine_id, // already hashed client-side
-    note: user.note || '',
+    note: user.note || "",
   };
   const signature = await signPayload(payload, env);
   const licenseKey = makeLicenseKey(payload, signature);
@@ -274,25 +287,41 @@ async function handleRegister(request, env) {
 
 async function handleVerify(request, env) {
   const body = await request.json().catch(() => ({}));
-  const licenseId = String(body.license_id || '').trim();
-  if (!licenseId) return json({ valid: false, error: 'no license_id' }, 400);
+  const licenseId = String(body.license_id || "").trim();
+  if (!licenseId) return json({ valid: false, error: "no license_id" }, 400);
 
   const [data, revoked] = await Promise.all([loadUsers(env), loadRevoked(env)]);
   const user = data.users.find((u) => u.license_id === licenseId);
-  if (!user) return json({ valid: false, status: 'not_found' });
+  if (!user) return json({ valid: false, status: "not_found" });
   if ((revoked.revoked || []).includes(licenseId)) {
-    return json({ valid: false, status: 'revoked', expires_at: user.expires_at });
+    return json({
+      valid: false,
+      status: "revoked",
+      expires_at: user.expires_at,
+    });
   }
   if (user.expires_at) {
     const exp = new Date(user.expires_at);
     if (exp < new Date()) {
-      return json({ valid: false, status: 'expired', expires_at: user.expires_at });
+      return json({
+        valid: false,
+        status: "expired",
+        expires_at: user.expires_at,
+      });
     }
   }
-  // Touch last_seen
+  // Touch last_seen and update version if provided
   user.last_seen = new Date().toISOString();
+  if (body.version) {
+    user.version = String(body.version).trim();
+  }
   await saveUsers(env, data);
-  return json({ valid: true, status: 'active', expires_at: user.expires_at });
+  return json({
+    valid: true,
+    status: "active",
+    expires_at: user.expires_at,
+    allowed_version: user.allowed_version || null,
+  });
 }
 
 async function handleAdminList(env) {
@@ -303,10 +332,10 @@ async function handleAdminList(env) {
     return {
       ...u,
       status: revSet.has(u.license_id)
-        ? 'revoked'
+        ? "revoked"
         : expired
-        ? 'expired'
-        : 'active',
+          ? "expired"
+          : "active",
     };
   });
   return json({ users });
@@ -314,33 +343,33 @@ async function handleAdminList(env) {
 
 async function handleAdminExtend(request, env) {
   const body = await request.json().catch(() => ({}));
-  const licenseId = String(body.license_id || '').trim();
+  const licenseId = String(body.license_id || "").trim();
   const days = parseInt(body.days, 10);
-  if (!licenseId) return json({ error: 'license_id required' }, 400);
+  if (!licenseId) return json({ error: "license_id required" }, 400);
 
   const data = await loadUsers(env);
   const user = data.users.find((u) => u.license_id === licenseId);
-  if (!user) return json({ error: 'not found' }, 404);
+  if (!user) return json({ error: "not found" }, 404);
 
   if (Number.isFinite(days) && days > 0) {
     // Extend from now (not from old expiry, so user always gets a fresh window)
     const newExp = new Date(Date.now() + days * 86400000);
     user.expires_at = newExp.toISOString();
   } else if (days === 0) {
-    user.expires_at = ''; // perpetual
+    user.expires_at = ""; // perpetual
   }
-  user.note = `extended by admin to ${user.expires_at || 'perpetual'}`;
+  user.note = `extended by admin to ${user.expires_at || "perpetual"}`;
   await saveUsers(env, data);
 
   // Regenerate signed license key so the next /verify brings the new expiry
   const payload = {
     license_id: user.license_id,
-    name: user.name || '',
+    name: user.name || "",
     email: user.email,
     issued_at: user.issued_at,
-    expires_at: user.expires_at || '',
+    expires_at: user.expires_at || "",
     machine_id_hash: user.machine_id,
-    note: user.note || '',
+    note: user.note || "",
   };
   const signature = await signPayload(payload, env);
   return json({
@@ -352,23 +381,23 @@ async function handleAdminExtend(request, env) {
 
 async function handleAdminRevoke(request, env) {
   const body = await request.json().catch(() => ({}));
-  const licenseId = String(body.license_id || '').trim();
-  if (!licenseId) return json({ error: 'license_id required' }, 400);
+  const licenseId = String(body.license_id || "").trim();
+  if (!licenseId) return json({ error: "license_id required" }, 400);
   const data = await loadRevoked(env);
   const list = data.revoked || [];
   if (!list.includes(licenseId)) list.push(licenseId);
   data.revoked = list;
   data.updated_at = new Date().toISOString();
   data.notes = data.notes || {};
-  data.notes[licenseId] = body.reason || '';
+  data.notes[licenseId] = body.reason || "";
   await saveRevoked(env, data);
   return json({ ok: true });
 }
 
 async function handleAdminRestore(request, env) {
   const body = await request.json().catch(() => ({}));
-  const licenseId = String(body.license_id || '').trim();
-  if (!licenseId) return json({ error: 'license_id required' }, 400);
+  const licenseId = String(body.license_id || "").trim();
+  if (!licenseId) return json({ error: "license_id required" }, 400);
   const data = await loadRevoked(env);
   data.revoked = (data.revoked || []).filter((x) => x !== licenseId);
   data.updated_at = new Date().toISOString();
@@ -387,8 +416,8 @@ async function handleAdminImport(request, env) {
   // embedded public key before calling /admin/import.
   const body = await request.json().catch(() => ({}));
   const payload = body.payload || body;
-  const licenseId = String(payload.license_id || '').trim();
-  if (!licenseId) return json({ error: 'license_id required' }, 400);
+  const licenseId = String(payload.license_id || "").trim();
+  if (!licenseId) return json({ error: "license_id required" }, 400);
 
   const data = await loadUsers(env);
   const existing = data.users.find((u) => u.license_id === licenseId);
@@ -405,21 +434,56 @@ async function handleAdminImport(request, env) {
 
   data.users.push({
     license_id: licenseId,
-    machine_id: String(body.machine_id || payload.machine_id_hash || ''),
-    email: String(payload.email || '').toLowerCase(),
-    name: String(payload.name || ''),
-    hostname: String(body.hostname || ''),
-    os_user: String(body.os_user || ''),
-    version: String(body.version || ''),
+    machine_id: String(body.machine_id || payload.machine_id_hash || ""),
+    email: String(payload.email || "").toLowerCase(),
+    name: String(payload.name || ""),
+    hostname: String(body.hostname || ""),
+    os_user: String(body.os_user || ""),
+    version: String(body.version || ""),
     issued_at: payload.issued_at || new Date().toISOString(),
-    expires_at: payload.expires_at || '',
+    expires_at: payload.expires_at || "",
     first_seen: payload.issued_at || new Date().toISOString(),
     last_seen: new Date().toISOString(),
-    status: 'active',
-    note: payload.note || 'imported from offline issue',
+    status: "active",
+    note: payload.note || "imported from offline issue",
   });
   await saveUsers(env, data);
   return json({ ok: true, imported: true });
+}
+
+async function handleAdminUpdateUser(request, env) {
+  const body = await request.json().catch(() => ({}));
+  const licenseId = String(body.license_id || "").trim();
+  if (!licenseId) return json({ error: "license_id required" }, 400);
+
+  const data = await loadUsers(env);
+  const user = data.users.find((u) => u.license_id === licenseId);
+  if (!user) return json({ error: "not found" }, 404);
+
+  if (body.allowed_version !== undefined) {
+    user.allowed_version = String(body.allowed_version).trim() || null;
+  }
+  await saveUsers(env, data);
+  return json({
+    ok: true,
+    license_id: licenseId,
+    allowed_version: user.allowed_version,
+  });
+}
+
+async function handleAdminPushVersion(request, env) {
+  const body = await request.json().catch(() => ({}));
+  const version = String(body.version || "").trim();
+  if (!version) return json({ error: "version required" }, 400);
+
+  const data = await loadUsers(env);
+  let updated = 0;
+  for (const user of data.users) {
+    user.allowed_version = version;
+    updated++;
+  }
+  await saveUsers(env, data);
+  return json({ ok: true, version, updated });
 }
 
 async function handleAdminDelete(request, env) {
@@ -427,8 +491,8 @@ async function handleAdminDelete(request, env) {
   // accounts and confirmed-departed users. Note: this is different from
   // /admin/revoke which keeps the row but marks it blacklisted.
   const body = await request.json().catch(() => ({}));
-  const licenseId = String(body.license_id || '').trim();
-  if (!licenseId) return json({ error: 'license_id required' }, 400);
+  const licenseId = String(body.license_id || "").trim();
+  if (!licenseId) return json({ error: "license_id required" }, 400);
 
   const data = await loadUsers(env);
   const before = data.users.length;

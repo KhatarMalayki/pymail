@@ -5,7 +5,7 @@ import email
 from email import policy
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def _decode_header(value):
@@ -31,7 +31,7 @@ def parse_message(raw_bytes: bytes, uidl: str = None) -> dict:
         "cc": _decode_header(msg.get("Cc")),
         "bcc": _decode_header(msg.get("Bcc")),
         "subject": _decode_header(msg.get("Subject")) or "(no subject)",
-        "date_received": datetime.utcnow().isoformat(),
+        "date_received": datetime.now(timezone.utc).isoformat(),
         "date_sent": None,
         "body_plain": "",
         "body_html": "",

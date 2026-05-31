@@ -7,7 +7,7 @@ Public flow:
        (user can still set up an account)
     2. After the first POP3 fetch succeeds, call register_now() which
        hits POST /register with machine_id + email. The Worker returns
-       a signed license key, we save it to ~/.pymail/license.json.
+       a signed license key, we save it to ~/.runlabmail/license.json.
     3. App reloads license, app is now in "trial" mode (30 days by default).
 
 Admin flow (only the developer machine has the admin token):
@@ -26,8 +26,8 @@ import urllib.request
 from . import license as licmod
 from .version import __version__, LICENSE_API_URL
 
-
 # ---------- URL config ----------
+
 
 def get_api_url() -> str:
     """Returns the Worker base URL. Trims trailing slash for clean joins."""
@@ -48,15 +48,15 @@ def get_api_url() -> str:
         pass
     return (LICENSE_API_URL or "").rstrip("/")
 
-
 # ---------- HTTP helpers ----------
+
 
 class WorkerError(Exception):
     pass
 
 
-def _post(path: str, body: dict, timeout: int = 10,
-          headers: dict | None = None) -> dict:
+def _post(path: str, body: dict, timeout: int=10,
+          headers: dict | None=None) -> dict:
     base = get_api_url()
     if not base:
         raise WorkerError("License API URL is not configured.")
@@ -64,7 +64,7 @@ def _post(path: str, body: dict, timeout: int = 10,
     payload = json.dumps(body).encode("utf-8")
     req_headers = {
         "Content-Type": "application/json",
-        "User-Agent": f"PyMail/{__version__}",
+        "User-Agent": f"RunLabMail/{__version__}",
     }
     if headers:
         req_headers.update(headers)
@@ -84,14 +84,14 @@ def _post(path: str, body: dict, timeout: int = 10,
     except json.JSONDecodeError:
         raise WorkerError("Server returned non-JSON response")
 
-
 # ---------- Public API (used by the running RunLab Mail) ----------
 
-def register_now(email: str, name: str = "") -> dict:
+
+def register_now(email: str, name: str="") -> dict:
     """Register this machine + email with the license Worker.
 
     Returns the parsed response (contains license_key + expires_at).
-    The signed license key is also saved to ~/.pymail/license.json so
+    The signed license key is also saved to ~/.runlabmail/license.json so
     RunLab Mail picks it up automatically.
     """
     body = {
@@ -126,7 +126,7 @@ def register_now(email: str, name: str = "") -> dict:
 def verify_now(license_id: str) -> dict:
     """Ping the Worker for fresh status of a license_id (active / revoked /
     expired). Used periodically to detect admin actions."""
-    return _post("/verify", {"license_id": license_id})
+    return _post("/verify", {"license_id": license_id, "version": __version__})
 
 
 def _safe_user() -> str:
@@ -135,8 +135,8 @@ def _safe_user() -> str:
     except Exception:
         return os.environ.get("USERNAME") or os.environ.get("USER") or ""
 
-
 # ---------- Admin API (only the developer's machine has the token) ----------
+
 
 def admin_headers(token: str) -> dict:
     return {"X-Admin-Token": token}
@@ -156,7 +156,7 @@ def admin_extend(token: str, license_id: str, days: int) -> dict:
     )
 
 
-def admin_revoke(token: str, license_id: str, reason: str = "") -> dict:
+def admin_revoke(token: str, license_id: str, reason: str="") -> dict:
     return _post(
         "/admin/revoke",
         {"license_id": license_id, "reason": reason},
@@ -173,10 +173,10 @@ def admin_restore(token: str, license_id: str) -> dict:
 
 
 def admin_import(token: str, license_obj: dict, *,
-                 machine_id: str = "",
-                 hostname: str = "",
-                 os_user: str = "",
-                 version: str = "") -> dict:
+                 machine_id: str="",
+                 hostname: str="",
+                 os_user: str="",
+                 version: str="") -> dict:
     """Push an offline-issued license into the Worker registry so it
     shows up in License Manager. license_obj is the parsed
     {payload, signature} dict from licmod.parse_license_string()."""
@@ -197,5 +197,24 @@ def admin_delete(token: str, license_id: str) -> dict:
     return _post(
         "/admin/delete",
         {"license_id": license_id},
+        headers=admin_headers(token),
+    )
+
+
+def admin_push_version(token: str, version: str) -> dict:
+    """Set allowed_version on all user records. Users only auto-update
+    to versions that have been pushed by the admin."""
+    return _post(
+        "/admin/push-version",
+        {"version": version},
+        headers=admin_headers(token),
+    )
+
+
+def admin_push_version_single(token: str, license_id: str, version: str) -> dict:
+    """Set allowed_version for a single user record."""
+    return _post(
+        "/admin/update-user",
+        {"license_id": license_id, "allowed_version": version},
         headers=admin_headers(token),
     )

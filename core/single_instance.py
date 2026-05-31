@@ -18,6 +18,14 @@ def _server_name() -> str:
         user = getpass.getuser()
     except Exception:
         user = "default"
+    return f"RunLabMail-singleinstance-{user}"
+
+
+def _legacy_server_name() -> str:
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = "default"
     return f"PyMail-singleinstance-{user}"
 
 
@@ -37,21 +45,22 @@ class SingleInstance(QObject):
         """
         name = _server_name()
 
-        # Probe: try to connect to existing server. The mere connection is
-        # enough — we don't need to send any payload.
-        sock = QLocalSocket()
-        sock.connectToServer(name)
-        if sock.waitForConnected(500):
-            # Give the server a moment to register the connection before
-            # we close it. Without this, the server may receive the
-            # connect+disconnect too fast on Windows.
-            sock.waitForBytesWritten(50)
-            sock.flush()
-            # Give the server side ~200ms to fire newConnection on its
-            # event loop before we close
-            sock.waitForDisconnected(200)
-            sock.abort()
-            return False
+        # Probe both the current and legacy server names so upgraded builds
+        # still detect older running instances.
+        for probe_name in (name, _legacy_server_name()):
+            sock = QLocalSocket()
+            sock.connectToServer(probe_name)
+            if sock.waitForConnected(500):
+                # Give the server a moment to register the connection before
+                # we close it. Without this, the server may receive the
+                # connect+disconnect too fast on Windows.
+                sock.waitForBytesWritten(50)
+                sock.flush()
+                # Give the server side ~200ms to fire newConnection on its
+                # event loop before we close
+                sock.waitForDisconnected(200)
+                sock.abort()
+                return False
 
         # No server reachable. Cleanup any stale lock and start fresh.
         QLocalServer.removeServer(name)

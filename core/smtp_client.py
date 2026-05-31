@@ -36,6 +36,12 @@ def _data_uris_to_cid(html: str) -> tuple[str, list[tuple[str, str, bytes]]]:
         (rewritten_html, [(cid_no_brackets, mime_subtype, raw_bytes), ...])
     """
     images: list[tuple[str, str, bytes]] = []
+    # IMPORTANT: compute the Content-ID domain ONCE. make_msgid() with no
+    # domain calls socket.getfqdn(), which can do a ~5s blocking DNS reverse
+    # lookup on Windows. Calling it once per image (signatures often have
+    # several logos) froze the UI for ~30s. A fixed local domain is fine —
+    # Content-IDs only need to be unique within the message, not resolvable.
+    cid_domain = "runlabmail.local"
 
     def _replace(match: re.Match) -> str:
         prefix, subtype, b64data, suffix = match.groups()
@@ -45,7 +51,7 @@ def _data_uris_to_cid(html: str) -> tuple[str, list[tuple[str, str, bytes]]]:
             return match.group(0)  # leave as-is
         if not data:
             return match.group(0)
-        cid = make_msgid()[1:-1]  # strip the < >
+        cid = make_msgid(domain=cid_domain)[1:-1]  # strip the < >
         images.append((cid, subtype.lower(), data))
         return f'{prefix}cid:{cid}{suffix}'
 

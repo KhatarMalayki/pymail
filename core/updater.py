@@ -19,18 +19,18 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
 import urllib.request
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from .version import __version__, DEFAULT_MANIFEST_URL
-
+from .version import __version__, DEFAULT_MANIFEST_URLS
 
 # Persistent state file for "last checked" timestamps
 _STATE_DIR = Path(os.path.expanduser("~")) / ".pymail"
 _STATE_DIR.mkdir(parents=True, exist_ok=True)
 _STATE_FILE = _STATE_DIR / "update_state.json"
+_USER_AGENT = f"RunLabMail/{__version__}"
 
 
 def _read_state() -> dict:
@@ -104,45 +104,108 @@ def _parse_version(v: str) -> tuple:
     return tuple(parts)
 
 
-def get_manifest_url() -> str:
-    """Allow users to override the manifest URL via pymail_update.json
-    placed next to the executable."""
+def _normalize_manifest_urls(data: dict | None) -> list[str]:
+    urls: list[str] = []
+    if not isinstance(data, dict):
+        return list(DEFAULT_MANIFEST_URLS)
+
+    listed = data.get("manifest_urls")
+    if isinstance(listed, list):
+        for item in listed:
+            if isinstance(item, str):
+                u = item.strip()
+                if u:
+                    urls.append(u)
+
+    single = data.get("manifest_url")
+    if isinstance(single, str):
+        u = single.strip()
+        if u:
+            urls.append(u)
+
+    if not urls:
+        urls.extend(DEFAULT_MANIFEST_URLS)
+
+    # Deduplicate while preserving order
+    return list(dict.fromkeys(urls))
+
+
+def get_manifest_urls() -> list[str]:
+    """Return update manifest URLs in priority order.
+
+    Supports both:
+      - manifest_url: "https://.../update_manifest.json"
+      - manifest_urls: ["https://primary/...", "https://backup/..."]
+    from pymail_update.json next to the executable.
+    """
     cfg = get_app_dir() / "pymail_update.json"
     if cfg.is_file():
         try:
             data = json.loads(cfg.read_text(encoding="utf-8"))
-            url = data.get("manifest_url")
-            if url:
-                return url
+            return _normalize_manifest_urls(data)
         except Exception:
             pass
-    return DEFAULT_MANIFEST_URL
+    return list(DEFAULT_MANIFEST_URLS)
 
 
-def check_for_updates(timeout: int = 8) -> dict | None:
-    """Return manifest dict if a newer version is available, else None.
+def get_manifest_url() -> str:
+    """Backward-compatible helper returning the first configured channel."""
+    return get_manifest_urls()[0]
+
+
+def _fetch_manifest(url: str, timeout: int) -> dict:
+    req = urllib.request.Request(
+        url, headers={"User-Agent": _USER_AGENT},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _get_allowed_version(timeout: int=5) -> str | None:
+    """Fetch allowed_version for this machine from the Worker /verify.
+    Returns None on failure or if field is absent (fail-open)."""
+    try:
+        from core import license as licmod
+        obj = licmod.load_license()
+        if not obj:
+            return None
+        payload = obj.get("payload") or {}
+        license_id = str(payload.get("license_id") or "").strip()
+        if not license_id:
+            return None
+        from core import license_client
+        resp = license_client.verify_now(license_id)
+        return resp.get("allowed_version") or None
+    except Exception:
+        return None
+
+
+def check_for_updates(timeout: int=8) -> dict | None:
+    """Return manifest dict if a newer version is available AND allowed, else None.
 
     Never raises. On any error returns None. Used by silent background checks.
     For the explicit/manual check that distinguishes "no update" from
     "network error", use check_now() instead.
     """
-    try:
-        url = get_manifest_url()
-        req = urllib.request.Request(
-            url, headers={"User-Agent": f"PyMail/{__version__}"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        _stamp_last_checked()
-        latest = str(data.get("version", "0"))
-        if _parse_version(latest) > _parse_version(__version__):
+    urls = get_manifest_urls()
+    for url in urls:
+        try:
+            data = _fetch_manifest(url, timeout=timeout)
+            _stamp_last_checked()
+            latest = str(data.get("version", "0"))
+            if _parse_version(latest) <= _parse_version(__version__):
+                return None
+            # Check if admin has pushed this version to this user
+            allowed = _get_allowed_version(timeout=timeout)
+            if allowed is not None and _parse_version(allowed) < _parse_version(latest):
+                return None
             return data
-    except Exception:
-        return None
+        except Exception:
+            continue
     return None
 
 
-def check_now(timeout: int = 8) -> tuple[str, object]:
+def check_now(timeout: int=8) -> tuple[str, object]:
     """Explicit update check. Returns one of:
 
         ("update",  manifest_dict)  — newer version available
@@ -152,27 +215,38 @@ def check_now(timeout: int = 8) -> tuple[str, object]:
     The "Last checked" timestamp is stamped only on "update" or "ok"
     (i.e. when the server actually replied), never on "error".
     """
-    try:
-        url = get_manifest_url()
-        req = urllib.request.Request(
-            url, headers={"User-Agent": f"PyMail/{__version__}"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as e:
-        return ("error", _friendly_network_error(e))
-    except (TimeoutError, OSError) as e:
-        return ("error", _friendly_network_error(e))
-    except json.JSONDecodeError:
-        return ("error", "Update server returned invalid data.")
-    except Exception as e:
-        return ("error", str(e))
+    urls = get_manifest_urls()
+    last_err: Exception | None = None
+    invalid_data_seen = False
 
-    _stamp_last_checked()
-    latest = str(data.get("version", "0"))
-    if _parse_version(latest) > _parse_version(__version__):
-        return ("update", data)
-    return ("ok", None)
+    for url in urls:
+        try:
+            data = _fetch_manifest(url, timeout=timeout)
+            _stamp_last_checked()
+            latest = str(data.get("version", "0"))
+            if _parse_version(latest) > _parse_version(__version__):
+                allowed = _get_allowed_version(timeout=timeout)
+                if allowed is not None and _parse_version(allowed) < _parse_version(latest):
+                    return ("ok", None)
+                return ("update", data)
+            return ("ok", None)
+        except json.JSONDecodeError:
+            invalid_data_seen = True
+            continue
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last_err = e
+            continue
+        except Exception as e:
+            last_err = e
+            continue
+
+    if invalid_data_seen and last_err is None:
+        return ("error", "Update server returned invalid data.")
+    if isinstance(last_err, (urllib.error.URLError, TimeoutError, OSError)):
+        return ("error", _friendly_network_error(last_err))
+    if last_err is not None:
+        return ("error", str(last_err))
+    return ("error", "No update channel configured.")
 
 
 def _friendly_network_error(exc: Exception) -> str:
@@ -196,7 +270,7 @@ def _friendly_network_error(exc: Exception) -> str:
 
 
 def download(manifest: dict, progress_cb=None) -> Path:
-    """Download the new .exe to a temp file, verify SHA256 if provided.
+    """Download update package (.exe legacy or .zip onedir), verify SHA256.
 
     Returns the verified file path. Raises on hash mismatch.
     """
@@ -204,10 +278,11 @@ def download(manifest: dict, progress_cb=None) -> Path:
     expected_sha = (manifest.get("sha256") or "").lower().strip()
     temp_dir = Path(tempfile.gettempdir()) / "pymail_update"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    target = temp_dir / f"PyMail-{manifest.get('version', 'new')}.exe"
+    fname = Path((url or "").split("?", 1)[0]).name or f"PyMail-{manifest.get('version', 'new')}.exe"
+    target = temp_dir / fname
 
     req = urllib.request.Request(
-        url, headers={"User-Agent": f"PyMail/{__version__}"}
+        url, headers={"User-Agent": _USER_AGENT}
     )
     hasher = hashlib.sha256()
     with urllib.request.urlopen(req, timeout=30) as resp, open(target, "wb") as f:
@@ -241,13 +316,23 @@ def download(manifest: dict, progress_cb=None) -> Path:
     return target
 
 
-def install_and_restart(new_exe: Path) -> None:
-    """Spawn a detached helper that swaps the .exe and relaunches.
+def _resolve_extracted_source_dir(extract_root: Path, exe_name: str) -> Path:
+    # Best case: zip contains a top-level app folder with the executable.
+    for p in extract_root.rglob(exe_name):
+        if p.is_file():
+            return p.parent
+    # Fallback: if no exe found (malformed package), use extract root itself.
+    return extract_root
+
+
+def install_and_restart(new_package: Path) -> None:
+    """Spawn a detached helper that installs update and relaunches.
     Then exits the current process."""
     if not is_frozen():
         raise RuntimeError("Auto-install requires the frozen .exe build.")
 
     current_exe = get_app_path()
+    app_dir = current_exe.parent
     pid = os.getpid()
     log_file = Path(tempfile.gettempdir()) / "pymail_update.log"
 
@@ -256,8 +341,59 @@ def install_and_restart(new_exe: Path) -> None:
     bat_path = update_dir / "do_update.bat"
     vbs_path = update_dir / "do_update.vbs"
 
-    # The batch does the actual work. It logs to %TEMP%\pymail_update.log
-    bat_content = f"""@echo off
+    package_ext = new_package.suffix.lower()
+
+    if package_ext == ".zip":
+        extract_dir = update_dir / f"extract_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(new_package, "r") as zf:
+            zf.extractall(extract_dir)
+
+        new_source_dir = _resolve_extracted_source_dir(extract_dir, current_exe.name)
+
+        bat_content = f"""@echo off
+setlocal
+set LOG="{log_file}"
+echo [%date% %time%] Onedir update starting > %LOG%
+
+rem Wait for old process (PID {pid}) to exit
+set /a tries=0
+:wait
+tasklist /FI "PID eq {pid}" 2>NUL | find " {pid} " >NUL
+if errorlevel 1 goto exited
+set /a tries+=1
+if %tries% GEQ 90 goto force
+ping -n 2 127.0.0.1 >NUL
+goto wait
+
+:force
+echo [%date% %time%] Process did not exit, killing PID {pid} >> %LOG%
+taskkill /PID {pid} /F >NUL 2>&1
+ping -n 3 127.0.0.1 >NUL
+
+:exited
+echo [%date% %time%] Mirroring new app directory >> %LOG%
+robocopy "{new_source_dir}" "{app_dir}" /MIR /R:3 /W:1 /NFL /NDL /NJH /NJS >> %LOG% 2>&1
+set RC=%ERRORLEVEL%
+if %RC% GEQ 8 goto fail
+
+echo [%date% %time%] Refreshing icon cache >> %LOG%
+ie4uinit.exe -show >NUL 2>&1
+ie4uinit.exe -ClearIconCache >NUL 2>&1
+
+echo [%date% %time%] Restarting >> %LOG%
+start "" "{current_exe}"
+del "{new_package}" >NUL 2>&1
+rmdir /S /Q "{extract_dir}" >NUL 2>&1
+exit /b 0
+
+:fail
+echo [%date% %time%] Onedir update FAILED with robocopy code %RC% >> %LOG%
+exit /b 1
+"""
+    else:
+        # The batch does the actual work. It logs to %TEMP%\pymail_update.log
+        bat_content = f"""@echo off
 setlocal
 set LOG="{log_file}"
 echo [%date% %time%] Update starting > %LOG%
@@ -278,10 +414,22 @@ taskkill /PID {pid} /F >NUL 2>&1
 ping -n 3 127.0.0.1 >NUL
 
 :exited
+echo [%date% %time%] Backing up current exe >> %LOG%
+copy /Y "{current_exe}" "{app_dir}\\Backup_{current_exe.name}" >> %LOG% 2>&1
+
+rem Create a rollback helper script for the user
+echo @echo off > "{app_dir}\\Rollback_to_Previous_Version.bat"
+echo echo Memulihkan ke versi sebelumnya... >> "{app_dir}\\Rollback_to_Previous_Version.bat"
+echo taskkill /IM {current_exe.name} /F ^>NUL 2^>^&1 >> "{app_dir}\\Rollback_to_Previous_Version.bat"
+echo timeout /t 2 /nobreak ^>NUL >> "{app_dir}\\Rollback_to_Previous_Version.bat"
+echo copy /Y "%~dp0Backup_{current_exe.name}" "%~dp0{current_exe.name}" >> "{app_dir}\\Rollback_to_Previous_Version.bat"
+echo start "" "%~dp0{current_exe.name}" >> "{app_dir}\\Rollback_to_Previous_Version.bat"
+echo exit >> "{app_dir}\\Rollback_to_Previous_Version.bat"
+
 echo [%date% %time%] Replacing exe >> %LOG%
 set /a copy_tries=0
 :copy
-copy /Y "{new_exe}" "{current_exe}" >> %LOG% 2>&1
+copy /Y "{new_package}" "{current_exe}" >> %LOG% 2>&1
 if not errorlevel 1 goto refresh
 set /a copy_tries+=1
 if %copy_tries% GEQ 10 goto fail
@@ -298,7 +446,7 @@ ie4uinit.exe -ClearIconCache >NUL 2>&1
 :restart
 echo [%date% %time%] Restarting >> %LOG%
 start "" "{current_exe}"
-del "{new_exe}" >NUL 2>&1
+del "{new_package}" >NUL 2>&1
 exit /b 0
 
 :fail

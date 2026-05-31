@@ -5,15 +5,13 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
 from . import config
-
 
 # DB_PATH is read at every connection so changes via Settings take effect
 # on next launch (after restart). It can also be re-read by callers.
 DB_PATH = str(config.get_db_path())
-
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
@@ -116,7 +114,6 @@ CREATE INDEX IF NOT EXISTS idx_attachments_hash
     ON attachments(file_hash);
 """
 
-
 # FTS5 virtual table created separately (uses CREATE VIRTUAL TABLE which
 # can't be in a CREATE TABLE IF NOT EXISTS chain reliably across versions).
 FTS_SCHEMA = """
@@ -174,6 +171,14 @@ def _migrate(conn):
     if "junk_purge_last_run" not in cols:
         conn.execute("ALTER TABLE accounts ADD COLUMN junk_purge_last_run TEXT")
 
+    # POP3 download tuning: socket timeout and per-message size cap
+    if "pop3_timeout" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN pop3_timeout INTEGER DEFAULT 120")
+    if "max_email_bytes" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN max_email_bytes INTEGER DEFAULT 0")
+    if "send_immediately" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN send_immediately INTEGER DEFAULT 0")
+
     # attachments.file_hash (legacy DBs only had `data` BLOB)
     cur = conn.execute("PRAGMA table_info(attachments)")
     att_cols = {row[1] for row in cur.fetchall()}
@@ -189,7 +194,7 @@ def _migrate(conn):
         conn.execute("ALTER TABLE emails ADD COLUMN references_hdr TEXT")
 
 
-def _migrate_blobs_to_store(conn, batch_size: int = 25):
+def _migrate_blobs_to_store(conn, batch_size: int=25):
     """Move attachments.data → on-disk store. One batch per call so the
     UI doesn't freeze for minutes on a multi-GB DB."""
     from . import attachment_store
@@ -220,6 +225,26 @@ def _migrate_blobs_to_store(conn, batch_size: int = 25):
         )
 
 
+def _migrate_passwords(conn):
+    from . import secure_storage
+    rows = conn.execute(
+        "SELECT id, pop3_password, smtp_password FROM accounts "
+        "WHERE pop3_password != '' OR smtp_password != ''"
+    ).fetchall()
+    for r in rows:
+        acc_id = r["id"]
+        pop3 = r["pop3_password"]
+        smtp = r["smtp_password"]
+        if pop3:
+            secure_storage.set_secret(f"pop3_pass_{acc_id}", pop3)
+        if smtp:
+            secure_storage.set_secret(f"smtp_pass_{acc_id}", smtp)
+        conn.execute(
+            "UPDATE accounts SET pop3_password='', smtp_password='' WHERE id=?",
+            (acc_id,)
+        )
+
+
 _lock = threading.Lock()
 
 
@@ -230,6 +255,7 @@ def get_conn():
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
         try:
             yield conn
             conn.commit()
@@ -246,6 +272,7 @@ def init_db():
         # Schema migrations FIRST so subsequent code can rely on the new
         # columns (file_hash, signature, etc.) being present.
         _migrate(conn)
+        _migrate_passwords(conn)
         # Indexes AFTER migration so legacy DBs that just got `file_hash`
         # ALTERed in can have idx_attachments_hash created on it.
         conn.executescript(INDEXES)
@@ -332,8 +359,8 @@ def move_to_inbox(email_id: int):
         (email_id,),
     )
 
-
 # ---------- Manual contacts (CSV import target) ----------
+
 
 def list_manual_contacts():
     with get_conn() as conn:
@@ -345,7 +372,7 @@ def list_manual_contacts():
 
 def upsert_manual_contacts(items: list[tuple[str, str]]) -> int:
     """Insert or update (name, email) pairs. Returns count touched."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     count = 0
     with get_conn() as conn:
         for name, email in items:
@@ -366,8 +393,8 @@ def delete_manual_contact(email: str):
     with get_conn() as conn:
         conn.execute("DELETE FROM manual_contacts WHERE email=?", (email.lower(),))
 
-
 # ---------- Accounts ----------
+
 
 def add_account(data: dict) -> int:
     cols = [
@@ -378,18 +405,30 @@ def add_account(data: dict) -> int:
         "signature",
         "imap_host", "imap_port", "imap_ssl", "junk_folder_name", "imap_enabled",
         "junk_purge_days", "junk_purge_server",
+        "pop3_timeout", "max_email_bytes", "send_immediately",
         "created_at",
     ]
-    data = {**data, "created_at": datetime.utcnow().isoformat()}
+    pop3_pass = data.get("pop3_password", "")
+    smtp_pass = data.get("smtp_password", "")
+    data_copy = dict(data)
+    data_copy["pop3_password"] = ""
+    data_copy["smtp_password"] = ""
+    data_copy = {**data_copy, "created_at": datetime.now(timezone.utc).isoformat()}
     placeholders = ",".join(["?"] * len(cols))
-    values = [data.get(c) for c in cols]
+    values = [data_copy.get(c) for c in cols]
 
     with get_conn() as conn:
         cur = conn.execute(
             f"INSERT INTO accounts ({','.join(cols)}) VALUES ({placeholders})",
             values,
         )
-        return cur.lastrowid
+        acc_id = cur.lastrowid
+        from . import secure_storage
+        if pop3_pass:
+            secure_storage.set_secret(f"pop3_pass_{acc_id}", pop3_pass)
+        if smtp_pass:
+            secure_storage.set_secret(f"smtp_pass_{acc_id}", smtp_pass)
+        return acc_id
 
 
 def update_account(account_id: int, data: dict):
@@ -401,9 +440,22 @@ def update_account(account_id: int, data: dict):
         "signature",
         "imap_host", "imap_port", "imap_ssl", "junk_folder_name", "imap_enabled",
         "junk_purge_days", "junk_purge_server",
+        "pop3_timeout", "max_email_bytes", "send_immediately",
     ]
+    data_copy = dict(data)
+    from . import secure_storage
+    pop3_pass = data_copy.get("pop3_password")
+    smtp_pass = data_copy.get("smtp_password")
+    
+    if pop3_pass is not None:
+        secure_storage.set_secret(f"pop3_pass_{account_id}", pop3_pass)
+        data_copy["pop3_password"] = ""
+    if smtp_pass is not None:
+        secure_storage.set_secret(f"smtp_pass_{account_id}", smtp_pass)
+        data_copy["smtp_password"] = ""
+
     sets = ",".join([f"{c}=?" for c in cols])
-    values = [data.get(c) for c in cols] + [account_id]
+    values = [data_copy.get(c) for c in cols] + [account_id]
     with get_conn() as conn:
         conn.execute(f"UPDATE accounts SET {sets} WHERE id=?", values)
 
@@ -411,17 +463,31 @@ def update_account(account_id: int, data: dict):
 def delete_account(account_id: int):
     with get_conn() as conn:
         conn.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+    from . import secure_storage
+    secure_storage.delete_secret(f"pop3_pass_{account_id}")
+    secure_storage.delete_secret(f"smtp_pass_{account_id}")
 
 
 def list_accounts():
     with get_conn() as conn:
-        return [dict(r) for r in conn.execute("SELECT * FROM accounts ORDER BY id")]
+        rows = [dict(r) for r in conn.execute("SELECT * FROM accounts ORDER BY id")]
+        from . import secure_storage
+        for d in rows:
+            d["pop3_password"] = secure_storage.get_secret(f"pop3_pass_{d['id']}", d["pop3_password"])
+            d["smtp_password"] = secure_storage.get_secret(f"smtp_pass_{d['id']}", d["smtp_password"])
+        return rows
 
 
 def get_account(account_id: int):
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        d = dict(row)
+        from . import secure_storage
+        d["pop3_password"] = secure_storage.get_secret(f"pop3_pass_{d['id']}", d["pop3_password"])
+        d["smtp_password"] = secure_storage.get_secret(f"smtp_pass_{d['id']}", d["smtp_password"])
+        return d
 
 
 def set_junk_purge_last_run(account_id: int, when_iso: str):
@@ -445,8 +511,8 @@ def list_old_junk(account_id: int, older_than_iso: str) -> list[dict]:
         ).fetchall()
         return [dict(r) for r in rows]
 
-
 # ---------- Emails ----------
+
 
 def email_exists(account_id: int, folder: str, uidl: str) -> bool:
     if not uidl:
@@ -477,7 +543,7 @@ def insert_email(account_id: int, folder: str, parsed: dict, attachments: list) 
             parsed.get("from"), parsed.get("to"),
             parsed.get("cc"), parsed.get("bcc"),
             parsed.get("subject"),
-            parsed.get("date_received") or datetime.utcnow().isoformat(),
+            parsed.get("date_received") or datetime.now(timezone.utc).isoformat(),
             parsed.get("date_sent"),
             parsed.get("body_plain"), parsed.get("body_html"),
             1 if folder == "sent" else 0,
@@ -515,7 +581,7 @@ def insert_email(account_id: int, folder: str, parsed: dict, attachments: list) 
 def _refresh_contact_cache_for(conn, parsed: dict):
     """Update contact_cache from a single parsed email's headers."""
     from email.utils import getaddresses
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     for field in ("from", "to", "cc"):
         value = parsed.get(field) or ""
         if not value:
@@ -569,9 +635,9 @@ def rebuild_contact_cache():
             _refresh_contact_cache_for(conn, parsed)
 
 
-def list_emails(account_id: int, folder: str, search: str = "",
-                sort_field: str = "date_received", sort_desc: bool = True,
-                limit: int | None = None, offset: int = 0):
+def list_emails(account_id: int, folder: str, search: str="",
+                sort_field: str="date_received", sort_desc: bool=True,
+                limit: int | None=None, offset: int=0):
     """List emails. When `search` is set, uses FTS5 if available for fast
     full-text search across subject/sender/body; falls back to LIKE.
 
@@ -672,7 +738,7 @@ def _build_fts_query(raw: str) -> str:
     return " ".join(f"{w}*" for w in words)
 
 
-def count_emails(account_id: int, folder: str, search: str = "") -> int:
+def count_emails(account_id: int, folder: str, search: str="") -> int:
     """Count without fetching rows — useful for pagination UI."""
     with get_conn() as conn:
         if search:
@@ -713,13 +779,13 @@ def get_email(email_id: int):
         email["attachments"] = [dict(a) for a in atts]
         return email
 
-
 # ---------- Drafts ----------
+
 
 def save_draft(account_id: int, draft_id: int | None, fields: dict) -> int:
     """Insert or update a draft. Returns the draft email_id."""
     from datetime import datetime
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_conn() as conn:
         if draft_id:
             row = conn.execute(
@@ -783,8 +849,8 @@ def delete_draft(draft_id: int):
             (draft_id,),
         )
 
-
 # ---------- Outbox ----------
+
 
 def queue_outbox(account_id: int, fields: dict, raw_bytes: bytes) -> int:
     """Insert an email into the outbox folder, ready to be sent.
@@ -810,7 +876,7 @@ def queue_outbox(account_id: int, fields: dict, raw_bytes: bytes) -> int:
             fields.get("cc") or "",
             fields.get("bcc") or "",
             fields.get("subject") or "(no subject)",
-            datetime.utcnow().isoformat(),
+            datetime.now(timezone.utc).isoformat(),
             fields.get("body") or "",
             raw_b64,  # store raw MIME (base64) in body_html column for re-send
             len(raw_bytes),
@@ -845,7 +911,7 @@ def get_outbox_raw(email_id: int) -> bytes | None:
             return None
 
 
-def move_outbox_to_sent(email_id: int, new_raw: bytes | None = None):
+def move_outbox_to_sent(email_id: int, new_raw: bytes | None=None):
     """Mark an outbox email as sent. Clears the raw-MIME blob and re-stores
     the email cleanly under the 'sent' folder. Optionally accepts a fresh
     raw payload to re-parse (in case the original lacked Date header)."""
@@ -971,7 +1037,7 @@ def _exec_with_fts_repair(sql: str, params: tuple):
             raise
 
 
-def mark_read(email_id: int, read: bool = True):
+def mark_read(email_id: int, read: bool=True):
     _exec_with_fts_repair(
         "UPDATE emails SET is_read=? WHERE id=?",
         (1 if read else 0, email_id),

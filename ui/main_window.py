@@ -8,8 +8,9 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTreeWidget,
     QTreeWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QLineEdit, QPushButton, QToolBar, QAction, QMessageBox, QStatusBar, QLabel,
-    QMenu, QFrame, QStyle, QSizePolicy,
+    QMenu, QFrame, QStyle, QSizePolicy, QToolButton
 )
+from .ribbon_toolbar import RibbonToolbar, RibbonGroup
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QIcon
 
@@ -32,11 +33,11 @@ from .view_bar import ViewBar
 # ---------- Outbox flusher (background) ----------
 class OutboxFlushWorker(QThread):
     log = pyqtSignal(str)
-    sent_one = pyqtSignal(int, int)   # account_id, outbox_id (now sent)
-    failed_one = pyqtSignal(int, str) # outbox_id, error
-    done = pyqtSignal(int, int)       # success_count, failure_count
+    sent_one = pyqtSignal(int, int)  # account_id, outbox_id (now sent)
+    failed_one = pyqtSignal(int, str)  # outbox_id, error
+    done = pyqtSignal(int, int)  # success_count, failure_count
 
-    def __init__(self, account_id: int | None = None):
+    def __init__(self, account_id: int | None=None):
         super().__init__()
         self.account_id = account_id
 
@@ -86,6 +87,9 @@ class LicenseCheckWorker(QThread):
     def run(self):
         ok, payload, err = licmod.is_licensed()
         if not ok:
+            err_lower = (err or "").lower()
+            if "no license" in err_lower or "not installed" in err_lower:
+                return
             self.revoked.emit(err)
 
 
@@ -94,7 +98,7 @@ class LicenseRegisterWorker(QThread):
     success = pyqtSignal(dict, str)  # payload, expires_at
     error = pyqtSignal(str)
 
-    def __init__(self, email: str, name: str = ""):
+    def __init__(self, email: str, name: str=""):
         super().__init__()
         self.email = email
         self.name = name
@@ -147,13 +151,14 @@ def _purge_old_junk(account: dict, log_cb=None) -> int:
     POP3-origin junk is local-only no matter what (POP3 has no folder
     semantics, so we can't tell the server which message to delete)."""
     import datetime as _dt
+    from datetime import timezone
     days = int(account.get("junk_purge_days") or 0)
     if days <= 0:
         return 0
-    cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=days)).isoformat()
+    cutoff = (_dt.datetime.now(timezone.utc) - _dt.timedelta(days=days)).isoformat()
     rows = database.list_old_junk(account["id"], cutoff)
     if not rows:
-        database.set_junk_purge_last_run(account["id"], _dt.datetime.utcnow().isoformat())
+        database.set_junk_purge_last_run(account["id"], _dt.datetime.now(timezone.utc).isoformat())
         return 0
 
     # Server-side delete first (so if we crash, local cleanup retries next time).
@@ -175,7 +180,7 @@ def _purge_old_junk(account: dict, log_cb=None) -> int:
         except Exception:
             continue
 
-    database.set_junk_purge_last_run(account["id"], _dt.datetime.utcnow().isoformat())
+    database.set_junk_purge_last_run(account["id"], _dt.datetime.now(timezone.utc).isoformat())
     return purged_local
 
 
@@ -247,7 +252,7 @@ class MainWindow(QMainWindow):
         ("trash", "Trash", "🗑"),
     ]
 
-    def __init__(self, license_payload: dict | None = None):
+    def __init__(self, license_payload: dict | None=None):
         super().__init__()
         self.setWindowTitle(f"RunLab Mail {__version__}")
         self.resize(1280, 760)
@@ -275,13 +280,10 @@ class MainWindow(QMainWindow):
         self.auto_timer.timeout.connect(self._auto_fetch_all)
         self.auto_timer.start(5 * 60 * 1000)
 
-        # Periodic outbox flush every 2 minutes (retries failed sends)
-        self.outbox_timer = QTimer(self)
-        self.outbox_timer.timeout.connect(self._flush_outbox_silent)
-        self.outbox_timer.start(2 * 60 * 1000)
+        # Outbox is MANUAL-send: queued mail stays in the Outbox until the
+        # user explicitly runs Send/Receive. This gives a chance to review or
+        # edit a message before it actually goes out. (No periodic auto-flush.)
         self._outbox_worker = None
-        # Initial flush a few seconds after launch (catch leftover from prior crash)
-        QTimer.singleShot(5000, self._flush_outbox_silent)
 
         # One-time legacy attachment migration (BLOBs → filesystem store).
         # Runs in background so users with multi-GB DBs don't hang on launch.
@@ -321,111 +323,116 @@ class MainWindow(QMainWindow):
 
     # ----- UI -----
     def _build_ui(self):
-        # Toolbar
-        tb = QToolBar("Main")
-        tb.setMovable(False)
-        from PyQt5.QtCore import QSize
-        tb.setIconSize(QSize(20, 20))
-        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.addToolBar(tb)
-
+        # Ribbon Toolbar (Outlook-style)
+        self.ribbon = RibbonToolbar(self)
         st = self.style()
-        # ---- Primary actions (left) ----
-        act_send_recv = QAction(
-            st.standardIcon(QStyle.SP_BrowserReload), "Send / Receive", self
+        
+        # Home Tab
+        home_tab = self.ribbon.add_tab("Home")
+        
+        # New Group
+        new_group = home_tab.add_group("New")
+        self._btn_new_email = new_group.add_button(
+            "New Email", st.standardIcon(QStyle.SP_FileDialogNewFolder),
+            self._compose_new, large=True,
+            tooltip="Compose a new email (Ctrl+N)"
         )
-        act_send_recv.setToolTip("Fetch new emails and flush the Outbox")
-        act_send_recv.triggered.connect(self._fetch_current)
-        tb.addAction(act_send_recv)
-
-        act_compose = QAction(
-            st.standardIcon(QStyle.SP_FileDialogNewFolder), "New Email", self
+        self._btn_new_email.setShortcut("Ctrl+N")
+        
+        # Send/Receive Group
+        sendrecv_group = home_tab.add_group("Send/Receive")
+        sendrecv_group.add_button(
+            "Send/Receive", st.standardIcon(QStyle.SP_BrowserReload),
+            self._fetch_current, large=True,
+            tooltip="Fetch new emails and flush the Outbox"
         )
-        act_compose.setShortcut("Ctrl+N")
-        act_compose.setToolTip("Compose a new email (Ctrl+N)")
-        act_compose.triggered.connect(self._compose_new)
-        tb.addAction(act_compose)
-
-        tb.addSeparator()
-
-        # ---- Search in the middle (Outlook-style) ----
-        # Stretchable left spacer to push search to the visual center
-        left_spacer = QWidget()
-        left_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        tb.addWidget(left_spacer)
-
-        search_label = QLabel("🔍 ")
-        search_label.setStyleSheet("color:#605e5c;")
-        tb.addWidget(search_label)
+        
+        # Search Group
+        search_group = home_tab.add_group("Search")
+        search_icon = QLabel("🔍")
+        search_icon.setStyleSheet("font-size: 14px; color: #605e5c;")
+        search_group.btn_layout.addWidget(search_icon)
         self.search_edit = QLineEdit()
         self.search_edit.setObjectName("searchInput")
         self.search_edit.setPlaceholderText("Search subject, sender, body...")
         self.search_edit.setMinimumWidth(280)
         self.search_edit.setMaximumWidth(420)
         self.search_edit.textChanged.connect(self._on_search_changed)
-        tb.addWidget(self.search_edit)
-
-        # Stretchable right spacer to balance the search in the middle
-        right_spacer = QWidget()
-        right_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        tb.addWidget(right_spacer)
-
-        tb.addSeparator()
-
-        # ---- Account & data (right side) ----
-        act_account = QAction(
-            st.standardIcon(QStyle.SP_DialogOpenButton), "Accounts", self
+        search_group.btn_layout.addWidget(self.search_edit)
+        
+        # Account Group
+        account_group = home_tab.add_group("Account")
+        account_group.add_button(
+            "Accounts", st.standardIcon(QStyle.SP_DialogOpenButton),
+            self._open_accounts, tooltip="Manage email accounts"
         )
-        act_account.setToolTip("Manage email accounts (add, edit, delete)")
-        act_account.triggered.connect(self._open_accounts)
-        tb.addAction(act_account)
-
-        act_backup = QAction(
-            st.standardIcon(QStyle.SP_DriveHDIcon), "Backup", self
+        account_group.add_button(
+            "Backup", st.standardIcon(QStyle.SP_DriveHDIcon),
+            self._open_backup_menu, tooltip="Export/import data"
         )
-        act_backup.setToolTip("Export or import your RunLab Mail data file")
-        act_backup.triggered.connect(self._open_backup_menu)
-        tb.addAction(act_backup)
-
-        act_settings = QAction(
-            st.standardIcon(QStyle.SP_FileDialogDetailedView),
-            "Settings", self
+        
+        # View Tab
+        view_tab = self.ribbon.add_tab("View")
+        
+        # Settings Group
+        settings_group = view_tab.add_group("Settings")
+        settings_group.add_button(
+            "Settings", st.standardIcon(QStyle.SP_FileDialogDetailedView),
+            self._open_settings, large=True, tooltip="Application settings"
         )
-        act_settings.setToolTip("Application settings (data folder, etc.)")
-        act_settings.triggered.connect(self._open_settings)
-        tb.addAction(act_settings)
 
-        tb.addSeparator()
-
-        act_update = QAction(
-            st.standardIcon(QStyle.SP_MessageBoxInformation),
-            "About", self
+        # Theme Group (light/dark toggle)
+        from . import theme as theme_mod
+        theme_group = view_tab.add_group("Theme")
+        self._btn_theme = theme_group.add_button(
+            "Dark Mode" if not theme_mod.is_dark() else "Light Mode",
+            st.standardIcon(QStyle.SP_DesktopIcon),
+            self._toggle_theme, large=True,
+            tooltip="Switch between light and dark theme"
         )
-        act_update.setToolTip("Version info and check for updates")
-        act_update.triggered.connect(self._open_about)
-        tb.addAction(act_update)
 
-        act_license = QAction(
-            st.standardIcon(QStyle.SP_FileDialogContentsView),
-            "License", self
+        # Density Group (compact / cozy / comfortable)
+        from core import config as _cfg
+        density_group = view_tab.add_group("Density")
+        self._density = _cfg.get("list_density", "comfortable")
+        self._btn_density = density_group.add_button(
+            self._density_label(self._density),
+            st.standardIcon(QStyle.SP_FileDialogListView),
+            self._cycle_density, large=True,
+            tooltip="Change email list density (Compact / Cozy / Comfortable)"
         )
-        act_license.setToolTip("View your license info")
-        act_license.triggered.connect(self._show_license_info)
-        tb.addAction(act_license)
+        
+        # About Group
+        about_group = view_tab.add_group("About")
+        about_group.add_button(
+            "About", st.standardIcon(QStyle.SP_MessageBoxInformation),
+            self._open_about, tooltip="Version info"
+        )
+        self._btn_license_info = about_group.add_button(
+            "License", st.standardIcon(QStyle.SP_FileDialogContentsView),
+            self._show_license_info, tooltip="View license info (Shift+click for admin access)"
+        )
+        # Shift+click the License button reveals the hidden Admin tab.
+        self._btn_license_info.installEventFilter(self)
 
-        # Admin-only: License Manager. Shown only when the running user
-        # is recognized as the admin (their email matches ADMIN_EMAIL or
-        # they have a "note" containing 'admin' on their license).
-        if self._is_admin():
-            act_admin = QAction(
-                st.standardIcon(QStyle.SP_DialogResetButton),
-                "License Manager", self,
-            )
-            act_admin.setToolTip(
-                "Admin-only: issue, revoke, and manage all licenses"
-            )
-            act_admin.triggered.connect(self._open_license_manager)
-            tb.addAction(act_admin)
+        # Admin Tab — hidden by default. Revealed only when the developer
+        # Shift+clicks the License button (handled in eventFilter). Regular
+        # users never see it.
+        self._admin_tab = self.ribbon.add_tab("Admin")
+        admin_group = self._admin_tab.add_group("License")
+        self._btn_license_manager = admin_group.add_button(
+            "License Manager", st.standardIcon(QStyle.SP_FileDialogInfoView),
+            self._open_license_manager, large=True,
+            tooltip="Manage all licenses (requires admin passphrase)"
+        )
+        self._admin_tab_index = self.ribbon.indexOf(self._admin_tab)
+        # Hide it now that it's been registered.
+        self.ribbon.removeTab(self._admin_tab_index)
+        self._admin_tab_visible = False
+        
+        home_tab.add_spacer()
+        
+        self.setMenuWidget(self.ribbon)
 
         # Central widget: banner on top + 3-panel splitter below
         central = QWidget()
@@ -588,7 +595,7 @@ class MainWindow(QMainWindow):
     PAGE_SIZE = 200
 
     def _refresh_email_list(self):
-        self.email_list.clear()
+        self.email_list.reset_threads(self.current_folder)
         self.viewer.show_empty()
         self._loaded_count = 0
         if self.current_account_id is None:
@@ -630,8 +637,13 @@ class MainWindow(QMainWindow):
                 sort_desc=self.view_bar.sort_desc,
                 limit=2000,
             )
+            self._pending_thread_registry = {}
             emails = self._apply_grouping(emails)
             self._loaded_count = self._total_count  # treat as fully loaded
+            # Register thread children so heads can expand on click.
+            for key, children in getattr(
+                    self, "_pending_thread_registry", {}).items():
+                self.email_list.register_thread(key, children)
         else:
             self._loaded_count += len(emails)
 
@@ -689,13 +701,13 @@ class MainWindow(QMainWindow):
                 if parent_email and parent_email["id"] != e["id"]:
                     union(parent_email["id"], e["id"])
 
-        # ----- Subject-based fallback (catches threads where headers got
-        # stripped by intermediaries — common in corporate setups).
-        # Only union messages whose subject HAS a Re:/Fwd: prefix with
-        # an existing subject without one. We do NOT union all same-subject
-        # emails together, otherwise newsletters/notifications with
-        # identical subject lines (e.g. "New Article Release") would all
-        # collapse into one giant fake thread.
+        # ----- Subject-based grouping (conversation topic).
+        # Primary threading uses Message-ID/References above. As a fallback —
+        # and to match Outlook/eM Client "conversation" behavior — we also
+        # group messages that share the same normalized subject (after
+        # stripping any Re:/Fwd: prefixes). This catches threads whose headers
+        # were stripped by mail intermediaries (common in corporate setups)
+        # and conversations where the original lives in another folder.
         re_prefix = re.compile(
             r"^\s*(?:re|fw|fwd|aw|sv)\s*:\s*",
             re.IGNORECASE,
@@ -704,15 +716,21 @@ class MainWindow(QMainWindow):
         for e in emails:
             raw_subj = (e.get("subject") or "").strip()
             stripped = re_prefix.sub("", raw_subj).strip().lower()
-            if not stripped:
+            # Collapse repeated prefixes ("re: re: fwd:") fully.
+            while True:
+                nxt = re_prefix.sub("", stripped).strip()
+                if nxt == stripped:
+                    break
+                stripped = nxt
+            if not stripped or stripped == "(no subject)":
+                # Don't merge empty/placeholder subjects into one giant blob.
                 continue
-            had_prefix = bool(re_prefix.match(raw_subj))
-            if had_prefix:
-                # This is a reply/forward — try to attach it to an existing
-                # thread root with the same normalized subject.
-                root_id = roots_by_subject.get(stripped)
-                if root_id is not None and root_id != e["id"]:
-                    union(root_id, e["id"])
+            root_id = roots_by_subject.get(stripped)
+            if root_id is None:
+                # First message seen with this subject becomes the thread root.
+                roots_by_subject[stripped] = e["id"]
+            elif root_id != e["id"]:
+                union(root_id, e["id"])
             else:
                 # First non-reply seen with this subject becomes the root.
                 # Subsequent non-reply messages with the same subject are
@@ -732,29 +750,37 @@ class MainWindow(QMainWindow):
 
         # ----- Build the visible head row per thread
         result = []
+        # Reset thread registration on the list widget for this refresh.
+        thread_registry = {}
         for root in order:
             items = threads[root]
             # Most-recent first (preserve current sort order)
             head = dict(items[0])
             count = len(items)
             if count > 1:
-                # Strip the "Re: / Fwd:" so the displayed subject reads cleanly,
-                # then prepend the thread arrow + count.
+                # Strip the "Re: / Fwd:" so the displayed subject reads cleanly.
                 base_subj = head.get("subject") or "(no subject)"
                 clean = re.sub(
                     r"^(?:\s*(?:re|fw|fwd|aw|sv)\s*:\s*)+", "",
                     base_subj, flags=re.IGNORECASE,
                 ).strip() or "(no subject)"
-                head["subject"] = f"⤷  {clean}  ({count} messages)"
+                head["subject"] = f"{clean}  ({count})"
                 # Mark unread if any in the thread is unread
                 if any(not it.get("is_read") for it in items):
                     head["is_read"] = 0
                 # Mark has_attachments if any in the thread has them
                 if any(it.get("has_attachments") for it in items):
                     head["has_attachments"] = 1
-                # Stash the full thread on the head for later (optional)
-                head["_thread_ids"] = [it["id"] for it in items]
+                # Threading metadata for the list widget / delegate.
+                head["_thread_role"] = "head"
+                head["_thread_count"] = count
+                head["_thread_key"] = root
+                head["_thread_expanded"] = False
+                # Children = every message except the head (the latest).
+                thread_registry[root] = [dict(it) for it in items[1:]]
             result.append(head)
+        # Hand the children map to the list widget so it can expand on click.
+        self._pending_thread_registry = thread_registry
         return result
 
     def _format_date(self, iso: str) -> str:
@@ -894,7 +920,7 @@ class MainWindow(QMainWindow):
         self._update_folder_counts()
         self.status_label.setText("Moved to Junk (server folder is not affected — POP3 limitation)")
 
-    def _server_delete_if_imap(self, email_ids: list[int], reason: str = ""):
+    def _server_delete_if_imap(self, email_ids: list[int], reason: str=""):
         """If the given local emails came from IMAP (Junk folder), also
         delete them on the server. POP3-origin emails are silently skipped.
         Best-effort: errors are logged to the status bar but don't block
@@ -1011,10 +1037,12 @@ class MainWindow(QMainWindow):
         self._start_sync_with_dialog([self.current_account_id])
 
     def _auto_fetch_all(self):
-        # Silent background fetch — no dialog, just status bar updates
+        # Silent background fetch — no dialog, just status bar updates.
+        # NOTE: this only RECEIVES mail. It deliberately does NOT flush the
+        # Outbox — queued mail is sent only when the user runs Send/Receive,
+        # so a mistakenly-sent email can still be edited beforehand.
         for acc in database.list_accounts():
             self._fetch_account(acc["id"], silent=True)
-        self._flush_outbox_silent()
 
     def _start_sync_with_dialog(self, account_ids: list[int]):
         """Run a Send/Receive cycle for the given accounts with a visible
@@ -1417,7 +1445,11 @@ class MainWindow(QMainWindow):
         dlg.show()
 
     def _on_email_sent(self, account_id):
-        if account_id == self.current_account_id and self.current_folder == "sent":
+        # Queue-first design: a composed email goes to the Outbox and stays
+        # there until the user runs Send/Receive (manual flush). We do NOT
+        # auto-flush here — that would send immediately, which the user does
+        # not expect from an Outbox workflow.
+        if account_id == self.current_account_id and self.current_folder in ("sent", "outbox"):
             self._refresh_email_list()
         self._refresh_accounts_tree()
 
@@ -1455,12 +1487,20 @@ class MainWindow(QMainWindow):
         if atts:
             prefill["forwarded_attachments"] = atts
 
-        dlg = ComposeDialog(
-            self, account_id=self.current_account_id, prefill=prefill
-        )
-        self._track_compose(dlg)
-        dlg.sent.connect(self._on_email_sent)
-        dlg.show()
+        try:
+            dlg = ComposeDialog(
+                self, account_id=self.current_account_id, prefill=prefill
+            )
+            self._track_compose(dlg)
+            dlg.sent.connect(self._on_email_sent)
+            dlg.show()
+        except Exception as e:
+            import traceback
+            QMessageBox.critical(
+                self, "Error",
+                f"Failed to open compose dialog:\n{str(e)}\n\n"
+                f"{traceback.format_exc()}"
+            )
 
     @staticmethod
     def _prefix_subject(subject, prefix):
@@ -1494,13 +1534,13 @@ class MainWindow(QMainWindow):
 
         # Reply separator (Outlook-style):
         #   - 24px breathing room above
-        #   - thin horizontal rule
-        #   - 8px gap
+        #   - thin horizontal rule (real <hr>; Qt rich text ignores
+        #     border-top on a div, so a styled <hr> is what actually paints)
         #   - light gray box with bold field labels
         header = (
             "<div style=\"margin:24px 0 0 0;\">"
-            "<div style=\"border-top:2px solid #d1d1d1;height:0;"
-            "margin:0 0 12px 0;\"></div>"
+            "<hr style=\"border:none;border-top:1px solid #c8c6c4;"
+            "margin:0 0 12px 0;\" />"
             "<div style=\"font-family:'Segoe UI','Calibri',sans-serif;"
             "font-size:10pt;color:#444;background:#f7f7f7;"
             "border-left:3px solid #0078d4;padding:10px 14px;"
@@ -1540,7 +1580,7 @@ class MainWindow(QMainWindow):
         return header + (
             "<div style=\"margin:14px 0 0 0;padding:8px 0 0 14px;"
             "border-left:2px solid #e1e1e1;\">"
-            + inner + "</div>"
+            +inner + "</div>"
         )
 
     # ----- Single instance -----
@@ -1569,7 +1609,7 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     # ----- Auto-update -----
-    def _check_for_updates(self, silent: bool = True):
+    def _check_for_updates(self, silent: bool=True):
         if self._update_worker and self._update_worker.isRunning():
             return
         self._update_silent = silent
@@ -1727,7 +1767,11 @@ class MainWindow(QMainWindow):
         if not self.license_payload:
             QMessageBox.information(self, "RunLab Mail", "No license info available.")
             return
-        LicenseInfoDialog(self.license_payload, self).exec_()
+        dlg = LicenseInfoDialog(self.license_payload, self)
+        dlg.exec_()
+        # If the user pasted a new key, adopt it for this session.
+        if getattr(dlg, "_new_payload", None):
+            self.license_payload = dlg._new_payload
 
     def _open_about(self):
         dlg = AboutDialog(self, license_payload=self.license_payload)
@@ -1751,12 +1795,35 @@ class MainWindow(QMainWindow):
             in admin_emails
         )
 
+    # SHA-256 of the admin passphrase. To change: run
+    #   python -c "import hashlib; print(hashlib.sha256(b'YOUR_PASS').hexdigest())"
+    # and replace the value below.
+    _ADMIN_PASS_HASH = "f6f99ad5794eeebf16794908efb39e0c0944adcf57c0bc6b3d041a70d755804c"
+
     def _open_license_manager(self):
-        # Defensive double-check
-        if not self._is_admin():
+        import hashlib
+        from PyQt5.QtWidgets import QInputDialog, QLineEdit
+
+        # Check if we've already verified this session
+        if getattr(self, "_admin_unlocked", False):
+            self._launch_license_manager()
             return
-        # The manager dialog needs to import only when used (avoids loading
-        # admin code paths for non-admin users)
+
+        phrase, ok = QInputDialog.getText(
+            self, "Admin access",
+            "Enter admin passphrase:",
+            QLineEdit.Password,
+        )
+        if not ok:
+            return
+        digest = hashlib.sha256(phrase.encode()).hexdigest()
+        if digest != self._ADMIN_PASS_HASH:
+            QMessageBox.warning(self, "Access denied", "Incorrect passphrase.")
+            return
+        self._admin_unlocked = True
+        self._launch_license_manager()
+
+    def _launch_license_manager(self):
         try:
             from .license_manager_dialog import LicenseManagerDialog
             LicenseManagerDialog(self).exec_()
@@ -1808,12 +1875,81 @@ class MainWindow(QMainWindow):
         from .settings_dialog import SettingsDialog
         SettingsDialog(self).exec_()
 
+    def _density_label(self, density: str) -> str:
+        return {
+            "compact": "Compact",
+            "cozy": "Cozy",
+            "comfortable": "Comfortable",
+        }.get(density, "Comfortable")
+
+    def _cycle_density(self):
+        """Cycle list density: comfortable -> cozy -> compact -> comfortable."""
+        from core import config
+        order = ["comfortable", "cozy", "compact"]
+        try:
+            cur = self.email_list.current_density()
+        except Exception:
+            cur = self._density
+        nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else "comfortable"
+        self._density = nxt
+        self.email_list.set_density(nxt)
+        config.set_value("list_density", nxt)
+        if getattr(self, "_btn_density", None) is not None:
+            self._btn_density.setText(self._density_label(nxt))
+        self.status_label.setText(f"List density: {self._density_label(nxt)}")
+
+    def _toggle_theme(self):
+        """Switch between light and dark theme and re-skin the whole app live."""
+        from . import theme as theme_mod
+        from PyQt5.QtWidgets import QApplication
+        new_mode = theme_mod.toggle_mode()
+        # Re-apply the global stylesheet for the new palette.
+        theme_mod.apply_theme(QApplication.instance())
+        # Update the toggle button label.
+        if getattr(self, "_btn_theme", None) is not None:
+            self._btn_theme.setText(
+                "Light Mode" if new_mode == "dark" else "Dark Mode"
+            )
+        # Rebuild widgets that bake colors into their own stylesheets.
+        self._reskin_dynamic_widgets()
+        # Repaint custom-painted views (email-list delegate reads the theme).
+        try:
+            self.email_list.viewport().update()
+        except Exception:
+            pass
+        self.update()
+
+    def _reskin_dynamic_widgets(self):
+        """Re-apply stylesheets on widgets that build their own QSS from theme
+        tokens (they don't auto-update when the global stylesheet changes)."""
+        # Ribbon tab bar
+        rb = getattr(self, "ribbon", None)
+        if rb is not None and hasattr(rb, "apply_theme"):
+            try:
+                rb.apply_theme()
+            except Exception:
+                pass
+        # ViewBar
+        vb = getattr(self, "view_bar", None)
+        if vb is not None and hasattr(vb, "apply_theme"):
+            try:
+                vb.apply_theme()
+            except Exception:
+                pass
+        # Email viewer header/labels
+        ev = getattr(self, "viewer", None)
+        if ev is not None and hasattr(ev, "apply_theme"):
+            try:
+                ev.apply_theme()
+            except Exception:
+                pass
+
     # ----- Backup / Restore -----
     def _open_backup_menu(self):
         menu = QMenu(self)
         # Email DB
-        menu.addAction("Export backup (.pymail)", self._export_backup)
-        menu.addAction("Import backup (.pymail)", self._import_backup)
+        menu.addAction("Export backup file...", self._export_backup)
+        menu.addAction("Import backup file...", self._import_backup)
         menu.addSeparator()
         # Contacts
         menu.addAction("Export contacts to CSV...", self._export_contacts)
@@ -1832,7 +1968,7 @@ class MainWindow(QMainWindow):
         from datetime import datetime
         from core import contacts as contacts_mod
         default_name = (
-            f"pymail-contacts-{datetime.now().strftime('%Y%m%d')}.csv"
+            f"runlabmail-contacts-{datetime.now().strftime('%Y%m%d')}.csv"
         )
         path, _ = QFileDialog.getSaveFileName(
             self, "Export contacts", default_name,
@@ -1882,11 +2018,11 @@ class MainWindow(QMainWindow):
         from datetime import datetime
         import shutil
         default_name = (
-            f"pymail-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pymail"
+            f"runlabmail-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.runlabmail"
         )
         path, _ = QFileDialog.getSaveFileName(
             self, "Export RunLab Mail backup", default_name,
-            "RunLab Mail backup (*.pymail);;All files (*)"
+            "RunLab Mail backup (*.runlabmail *.pymail);;All files (*)"
         )
         if not path:
             return
@@ -1907,7 +2043,7 @@ class MainWindow(QMainWindow):
         import shutil
         path, _ = QFileDialog.getOpenFileName(
             self, "Import RunLab Mail backup", "",
-            "RunLab Mail backup (*.pymail);;Database files (*.db);;All files (*)"
+            "RunLab Mail backup (*.runlabmail *.pymail);;Database files (*.db);;All files (*)"
         )
         if not path:
             return
@@ -1928,7 +2064,7 @@ class MainWindow(QMainWindow):
             current = Path(database.DB_PATH)
             if current.is_file():
                 stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                safety = current.with_name(f"pymail.db.before-import-{stamp}")
+                safety = current.with_name(f"runlabmail.db.before-import-{stamp}")
                 shutil.copy2(current, safety)
             shutil.copy2(path, current)
             QMessageBox.information(
@@ -1954,10 +2090,48 @@ class MainWindow(QMainWindow):
             level="error",
             duration_ms=0,
         )
-        QMessageBox.critical(
-            self, "License revoked",
-            f"{err}\n\nRunLab Mail will close now.",
-        )
+        err_lower = err.lower()
+        if "no license" in err_lower or "not installed" in err_lower:
+            title = "No license installed"
+            msg = (
+                "No license is installed on this machine.\n\n"
+                "Please ask your administrator to issue a license for this device.\n\n"
+                "RunLab Mail will close now."
+            )
+        elif "expired" in err_lower:
+            title = "License expired"
+            msg = f"{err}\n\nPlease contact your administrator to renew.\n\nRunLab Mail will close now."
+        else:
+            title = "License revoked"
+            msg = f"{err}\n\nRunLab Mail will close now."
+        QMessageBox.critical(self, title, msg)
         # Force quit
         from PyQt5.QtWidgets import QApplication
         QApplication.instance().quit()
+
+    def eventFilter(self, obj, event):
+        from PyQt5.QtCore import QEvent, Qt
+        if event.type() == QEvent.MouseButtonPress:
+            if (obj is getattr(self, "_btn_license_info", None)
+                    and event.button() == Qt.LeftButton
+                    and (event.modifiers() & Qt.ShiftModifier)):
+                # Shift+click on License: reveal the hidden Admin tab and
+                # prompt for the admin passphrase.
+                self._reveal_admin_tab()
+                self._open_license_manager()
+                return True  # consume; don't also open the License info dialog
+        return super().eventFilter(obj, event)
+
+    def _reveal_admin_tab(self):
+        """Show the Admin ribbon tab (hidden by default) and switch to it."""
+        if getattr(self, "_admin_tab_visible", False):
+            # Already visible — just focus it.
+            idx = self.ribbon.indexOf(self._admin_tab)
+            if idx >= 0:
+                self.ribbon.setCurrentIndex(idx)
+            return
+        self.ribbon.addTab(self._admin_tab, "Admin")
+        self._admin_tab_visible = True
+        idx = self.ribbon.indexOf(self._admin_tab)
+        if idx >= 0:
+            self.ribbon.setCurrentIndex(idx)

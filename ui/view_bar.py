@@ -8,6 +8,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QLabel, QToolButton, QMenu, QAction,
 )
+from .theme import color as theme_color
 
 
 SORT_FIELDS = [
@@ -23,20 +24,16 @@ class ViewBar(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.sort_field = "date_received"
-        self.sort_desc = True
-        self.group_by_conversation = False
+        from core import config
+        self.sort_field = config.get("list_sort_field", "date_received")
+        self.sort_desc = config.get("list_sort_desc", True)
+        # Remember the conversation-grouping choice across sessions.
+        self.group_by_conversation = bool(config.get("group_by_conversation", False))
         self._build_ui()
 
     def _build_ui(self):
-        self.setStyleSheet(
-            "ViewBar { background:#faf9f8; border-bottom:1px solid #e1dfdd; }"
-            "QToolButton { padding:4px 8px; border-radius:3px; "
-            "color:#605e5c; }"
-            "QToolButton:hover { background:#f3f2f1; color:#201f1e; }"
-            "QToolButton:checked { color:#0078d4; font-weight:600; }"
-            "QLabel { color:#605e5c; }"
-        )
+        self.setObjectName("viewBar")
+        self.apply_theme()
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(4)
@@ -50,9 +47,9 @@ class ViewBar(QWidget):
         self._build_sort_menu()
         layout.addWidget(self.sort_btn)
 
-        sep = QLabel("  •  ")
-        sep.setStyleSheet("color:#c8c6c4;")
-        layout.addWidget(sep)
+        self._sep_label = QLabel("  •  ")
+        self._sep_label.setStyleSheet(f"color:{theme_color('separator')};")
+        layout.addWidget(self._sep_label)
 
         # Group by conversation toggle
         self.group_btn = QToolButton()
@@ -62,6 +59,10 @@ class ViewBar(QWidget):
             "Group emails with the same subject under one expandable header "
             "(threading)."
         )
+        # Restore the saved state without emitting toggled() during setup.
+        self.group_btn.blockSignals(True)
+        self.group_btn.setChecked(self.group_by_conversation)
+        self.group_btn.blockSignals(False)
         self.group_btn.toggled.connect(self._on_group_toggled)
         layout.addWidget(self.group_btn)
 
@@ -69,8 +70,34 @@ class ViewBar(QWidget):
 
         # Right-side: count label
         self.count_label = QLabel("")
-        self.count_label.setStyleSheet("color:#605e5c; padding-right:6px;")
+        self.count_label.setStyleSheet(
+            f"color:{theme_color('text_muted')}; padding-right:6px;"
+        )
         layout.addWidget(self.count_label)
+
+    def apply_theme(self):
+        """(Re)build the stylesheet from the active theme tokens. Safe to call
+        again after a theme switch."""
+        c_side = theme_color("bg_sidebar")
+        c_border = theme_color("border")
+        c_muted = theme_color("text_muted")
+        c_hover = theme_color("bg_hover")
+        c_text = theme_color("text")
+        c_primary = theme_color("primary")
+        self.setStyleSheet(
+            f"#viewBar {{ background:{c_side}; border-bottom:1px solid {c_border}; }}"
+            f"#viewBar QToolButton {{ padding:4px 8px; border-radius:3px; "
+            f"color:{c_muted}; }}"
+            f"#viewBar QToolButton:hover {{ background:{c_hover}; color:{c_text}; }}"
+            f"#viewBar QToolButton:checked {{ color:{c_primary}; font-weight:600; }}"
+            f"#viewBar QLabel {{ color:{c_muted}; }}"
+        )
+        if getattr(self, "_sep_label", None) is not None:
+            self._sep_label.setStyleSheet(f"color:{theme_color('separator')};")
+        if getattr(self, "count_label", None) is not None:
+            self.count_label.setStyleSheet(
+                f"color:{theme_color('text_muted')}; padding-right:6px;"
+            )
 
     def _build_sort_menu(self):
         menu = QMenu(self.sort_btn)
@@ -110,6 +137,8 @@ class ViewBar(QWidget):
         for f, act in self._field_actions.items():
             act.setChecked(f == field)
         self._refresh_button_label()
+        from core import config
+        config.set_value("list_sort_field", field)
         self.view_changed.emit()
 
     def _set_direction(self, desc: bool):
@@ -122,10 +151,14 @@ class ViewBar(QWidget):
         self.act_desc.setChecked(desc)
         self.act_asc.setChecked(not desc)
         self._refresh_button_label()
+        from core import config
+        config.set_value("list_sort_desc", desc)
         self.view_changed.emit()
 
     def _on_group_toggled(self, checked: bool):
         self.group_by_conversation = checked
+        from core import config
+        config.set_value("group_by_conversation", checked)
         self.view_changed.emit()
 
     def set_count(self, count: int):

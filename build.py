@@ -1,5 +1,6 @@
 """
-Build PyMail.exe (RunLab Mail) with PyInstaller, plus auto-generate update_manifest.json.
+Build RunLab Mail executable package (technical filename: PyMail.exe)
+with PyInstaller, plus auto-generate update_manifest.json.
 
 Usage:
     python build.py                              # build with placeholder URL
@@ -7,15 +8,15 @@ Usage:
     python build.py --url https://your.com/...   # set download URL in manifest
 
 Outputs:
-    dist/PyMail.exe                  - the built executable
-    dist/PyMail-{version}.exe        - versioned copy (upload this)
+    dist/PyMail/PyMail.exe           - built executable inside onedir package
+    dist/PyMail-{version}.zip        - versioned release package (upload this)
     dist/update_manifest.json        - manifest ready to upload
 
 Release flow:
     1. Bump core/version.py (__version__)
-    2. python build.py --url https://your-host.com/files/PyMail-1.0.1.exe
-    3. Upload dist/PyMail-1.0.1.exe AND dist/update_manifest.json to your host
-    4. Existing installs auto-upgrade on next launch
+    2. python build.py --url https://your-host.com/files/PyMail-1.0.1.zip
+    3. Upload dist/PyMail-1.0.1.zip AND dist/update_manifest.json to your host
+    4. Existing RunLab Mail installs auto-upgrade on next launch
 """
 import argparse
 import hashlib
@@ -23,6 +24,7 @@ import json
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -42,6 +44,15 @@ def sha256_of(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def zip_dir(src_dir: Path, out_zip: Path) -> None:
+    if out_zip.exists():
+        out_zip.unlink()
+    with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for p in src_dir.rglob("*"):
+            if p.is_file():
+                zf.write(p, p.relative_to(src_dir.parent))
 
 
 def main():
@@ -65,7 +76,7 @@ def main():
 
     pyi_args = [
         sys.executable, "-m", "PyInstaller",
-        "--noconfirm", "--clean", "--onefile",
+        "--noconfirm", "--clean", "--onedir",
         "--name", APP_NAME,
         "main.py",
     ]
@@ -82,22 +93,23 @@ def main():
         print("Build failed.")
         sys.exit(result.returncode)
 
-    out = ROOT / "dist" / f"{APP_NAME}.exe"
+    out = ROOT / "dist" / APP_NAME / f"{APP_NAME}.exe"
     if not out.is_file():
         print("Build finished but output not found.")
         sys.exit(1)
 
-    # Versioned copy + checksum
-    versioned = out.with_name(f"{APP_NAME}-{version}.exe")
-    shutil.copy2(out, versioned)
-    sha = sha256_of(versioned)
-    size_mb = versioned.stat().st_size / 1024 / 1024
+    package_zip = ROOT / "dist" / f"{APP_NAME}-{version}.zip"
+    zip_dir(out.parent, package_zip)
+    sha = sha256_of(package_zip)
+    size_mb = package_zip.stat().st_size / 1024 / 1024
 
     # Build manifest
     manifest = {
         "version": version,
-        "url": args.url or f"https://REPLACE-ME.example.com/PyMail-{version}.exe",
+        "url": args.url or f"https://REPLACE-ME.example.com/PyMail-{version}.zip",
         "sha256": sha,
+        "package_type": "zip_onedir",
+        "entry_exe": f"{APP_NAME}.exe",
         "notes": args.notes or f"RunLab Mail {version}",
         "mandatory": args.mandatory,
     }
@@ -106,7 +118,7 @@ def main():
 
     print()
     print("=" * 60)
-    print(f"Built:    {versioned.name}  ({size_mb:.1f} MB)")
+    print(f"Built:    {package_zip.name}  ({size_mb:.1f} MB)")
     print(f"SHA256:   {sha}")
     print(f"Manifest: {manifest_path}")
     print("=" * 60)
@@ -116,10 +128,10 @@ def main():
         print("     - Or rebuild with: python build.py --url https://...")
     print()
     print("To release this version:")
-    print(f"  1. Upload dist/{versioned.name} to your hosting")
-    print( "  2. Upload dist/update_manifest.json to the URL configured")
-    print( "     in core/version.py (DEFAULT_MANIFEST_URL)")
-    print( "  3. Existing installs will auto-upgrade on next launch.")
+    print(f"  1. Upload dist/{package_zip.name} to your hosting")
+    print("  2. Upload dist/update_manifest.json to the URL configured")
+    print("     in core/version.py (DEFAULT_MANIFEST_URL)")
+    print("  3. Existing installs will auto-upgrade on next launch.")
 
 
 if __name__ == "__main__":

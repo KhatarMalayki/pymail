@@ -7,11 +7,17 @@ from PyQt5.QtWidgets import (
     QTextEdit, QPushButton, QFileDialog, QMessageBox, QListWidget,
     QListWidgetItem, QLabel, QToolBar, QAction, QWidget, QSizePolicy,
     QCompleter, QFontComboBox, QSpinBox, QColorDialog, QToolButton, QFrame,
+    QSplitter, QScrollArea,
+    QStyle,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt5.QtGui import QIcon, QFont, QTextCharFormat, QTextListFormat, QColor
+from PyQt5.QtGui import (
+    QIcon, QFont, QTextCharFormat, QTextListFormat, QColor,
+    QTextTableFormat, QTextLength, QTextCursor, QTextFrameFormat,
+)
 from core import database, smtp_client, contacts
 from .recipient_completer import attach_to as attach_completer
+from .ribbon_toolbar import RibbonToolbar, RibbonGroup
 
 
 class SendWorker(QThread):
@@ -37,8 +43,8 @@ class ComposeDialog(QDialog):
 
     AUTOSAVE_INTERVAL_MS = 10_000  # 10 seconds
 
-    def __init__(self, parent=None, account_id=None, prefill: dict = None,
-                 draft_id: int | None = None):
+    def __init__(self, parent=None, account_id=None, prefill: dict=None,
+                 draft_id: int | None=None):
         super().__init__(parent)
         self.setWindowTitle("Compose")
         self.resize(820, 620)
@@ -52,6 +58,10 @@ class ComposeDialog(QDialog):
         # to splice the signature back in unmodified, bypassing Qt's lossy
         # toHtml() serialisation (which destroys complex table layouts).
         self._raw_signature_html = None
+        # Pristine quoted HTML for replies/forwards (set in _apply_prefill).
+        self._reply_quoted_html = None
+        # Enable fullscreen/maximize for compose dialog
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
         self._build_ui()
         self._load_accounts(account_id)
         if prefill:
@@ -71,31 +81,12 @@ class ComposeDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Toolbar (top action bar)
-        toolbar = QToolBar()
-        toolbar.setStyleSheet(
-            "QToolBar { background:#faf9f8; border:none; "
-            "border-bottom:1px solid #e1dfdd; padding:6px 8px; }"
-        )
-        send_act = QAction("📤  Send", self); send_act.triggered.connect(self._send)
-        attach_act = QAction("📎  Attach", self); attach_act.triggered.connect(self._add_attachment)
-        toolbar.addAction(send_act)
-        toolbar.addAction(attach_act)
-        # Make Send button stand out
-        send_btn = toolbar.widgetForAction(send_act)
-        if send_btn is not None:
-            send_btn.setStyleSheet(
-                "QToolButton { background:#0078d4; color:white; "
-                "padding:7px 14px; border-radius:4px; font-weight:600; }"
-                "QToolButton:hover { background:#106ebe; }"
-                "QToolButton:pressed { background:#005a9e; }"
-            )
-        layout.addWidget(toolbar)
-
-        # Header form area (white background, padded)
+        # Header form area (themed background, padded)
+        from . import theme as _theme
         header = QWidget()
         header.setStyleSheet(
-            "QWidget { background:#ffffff; border-bottom:1px solid #e1dfdd; }"
+            f"QWidget {{ background:{_theme.color('bg')}; "
+            f"border-bottom:1px solid {_theme.color('border')}; }}"
         )
         form = QFormLayout(header)
         form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -122,14 +113,17 @@ class ComposeDialog(QDialog):
         # Style label color
         def _row(label_text, widget):
             lbl = QLabel(label_text)
-            lbl.setStyleSheet("color:#605e5c; font-weight:600;")
+            lbl.setStyleSheet(
+                f"color:{_theme.color('text_muted')}; font-weight:600;"
+            )
             form.addRow(lbl, widget)
+
         _row("From", self.account_combo)
         _row("To", self.to_edit)
         _row("Cc", self.cc_edit)
         _row("Bcc", self.bcc_edit)
         _row("Subject", self.subject_edit)
-        layout.addWidget(header)
+        # Note: header akan di-add ke splitter, bukan langsung ke layout
 
         # Attachments strip (only visible when there's at least one)
         self.att_widget = QWidget()
@@ -193,132 +187,206 @@ class ComposeDialog(QDialog):
         layout.addWidget(self.att_widget)
         self.att_widget.setVisible(False)
 
-        # Body
+        # Body FIRST (needed by formatting toolbar)
         from .paste_aware_edit import PasteAwareTextEdit
         self.body_edit = PasteAwareTextEdit()
         self.body_edit.setPlaceholderText("Write your message...")
+        
+        # 1. Formatting toolbar (Sticky di atas, di LUAR scroll area)
+        fmt_bar = self._build_formatting_toolbar()
+        layout.addWidget(fmt_bar)
+        
+        # 2. Scroll area containing Header + Body
+        from PyQt5.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            f"QScrollArea {{ border: none; background: {_theme.color('bg')}; }}"
+        )
+        
+        # Container widget
+        container = QWidget()
+        vlayout = QVBoxLayout(container)
+        vlayout.setContentsMargins(0, 0, 0, 0)
+        vlayout.setSpacing(0)
+        vlayout.addWidget(header)
+        vlayout.addWidget(self.att_widget)
+        
+        # 3. Body styling - expand to fit content, NO internal scrollbar
         self.body_edit.setStyleSheet(
             "QTextEdit { background:#ffffff; border:none; padding:16px 20px; "
             "font-size:10pt; }"
         )
-
-        # Formatting toolbar (Outlook-style: font, size, B/I/U, color, list)
-        fmt_bar = self._build_formatting_toolbar()
-        layout.addWidget(fmt_bar)
-        layout.addWidget(self.body_edit, 1)
+        self.body_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.body_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        # Auto-resize body height to fit content so container scrollbar is used
+        doc = self.body_edit.document()
+        doc.documentLayout().documentSizeChanged.connect(self._update_body_height)
+        self.body_edit.setMinimumHeight(300)
+        vlayout.addWidget(self.body_edit)
+        
+        scroll.setWidget(container)
+        layout.addWidget(scroll, 1)
+        self._update_body_height()
 
         # Status (bottom)
         self.status_label = QLabel("")
         self.status_label.setStyleSheet(
-            "color:#605e5c; padding:6px 20px; "
-            "border-top:1px solid #e1dfdd; background:#faf9f8;"
+            f"color:{_theme.color('text_muted')}; padding:6px 20px; "
+            f"border-top:1px solid {_theme.color('border')}; "
+            f"background:{_theme.color('bg_sidebar')};"
         )
         layout.addWidget(self.status_label)
 
-    def _build_formatting_toolbar(self) -> QFrame:
-        """Build an Outlook-style formatting toolbar that drives the
-        body QTextEdit (font, size, B/I/U/strike, color, list, alignment,
-        clear formatting)."""
-        frame = QFrame()
-        frame.setStyleSheet(
-            "QFrame { background:#faf9f8; border:none; "
-            "border-bottom:1px solid #e1dfdd; }"
-            "QToolButton { background:transparent; border:1px solid transparent; "
-            "padding:4px 6px; border-radius:4px; min-width:24px; }"
-            "QToolButton:hover { background:#edebe9; border:1px solid #d2d0ce; }"
-            "QToolButton:checked { background:#cfe4fa; border:1px solid #9ec7f0; }"
-            "QToolButton:pressed { background:#c1deff; }"
-            "QFontComboBox, QComboBox, QSpinBox { "
-            "background:#ffffff; border:1px solid #d2d0ce; border-radius:4px; "
-            "padding:2px 4px; }"
+    def _build_formatting_toolbar(self) -> RibbonToolbar:
+        """Build an Outlook-style ribbon toolbar with tabs and groups."""
+        ribbon = RibbonToolbar(self)
+        ribbon.setMaximumHeight(120)
+        st = self.style()
+        
+        # === HOME TAB ===
+        home_tab = ribbon.add_tab("Home")
+        
+        # Message Group
+        msg_group = home_tab.add_group("Message")
+        msg_group.add_button(
+            "Send", st.standardIcon(QStyle.SP_ArrowForward), self._send, large=True,
+            tooltip="Send email (Ctrl+Enter)"
         )
-        row = QHBoxLayout(frame)
-        row.setContentsMargins(10, 6, 10, 6)
-        row.setSpacing(4)
-
-        # Font family
+        
+        # Clipboard Group
+        clip_group = home_tab.add_group("Clipboard")
+        clip_group.add_button("Cut", st.standardIcon(QStyle.SP_MessageBoxCritical), self._cut, tooltip="Cut")
+        clip_group.add_button("Copy", st.standardIcon(QStyle.SP_FileDialogInfoView), self._copy, tooltip="Copy")
+        clip_group.add_button("Paste", st.standardIcon(QStyle.SP_FileDialogNewFolder), self._paste, tooltip="Paste")
+        
+        # Basic Text Group
+        text_group = home_tab.add_group("Basic Text")
+        
+        # Font controls in a row
         self.font_combo = QFontComboBox()
-        self.font_combo.setMaximumWidth(180)
+        self.font_combo.setMaximumWidth(140)
         self.font_combo.setCurrentFont(QFont("Segoe UI"))
         self.font_combo.currentFontChanged.connect(self._on_font_family)
-        row.addWidget(self.font_combo)
-
-        # Font size
+        text_group.btn_layout.addWidget(self.font_combo)
+        
         self.size_combo = QComboBox()
         self.size_combo.setEditable(True)
-        self.size_combo.setMaximumWidth(64)
+        self.size_combo.setMaximumWidth(50)
         for s in (8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72):
             self.size_combo.addItem(str(s))
         self.size_combo.setCurrentText("10")
         self.size_combo.activated.connect(self._on_font_size)
         self.size_combo.lineEdit().editingFinished.connect(self._on_font_size)
-        row.addWidget(self.size_combo)
-
-        row.addWidget(self._sep())
-
-        # Bold / Italic / Underline / Strike
+        text_group.btn_layout.addWidget(self.size_combo)
+        
+        text_group.btn_layout.addSpacing(6)
+        
+        # Bold/Italic/Underline/Strike
         self.bold_btn = self._fmt_btn("B", "Bold (Ctrl+B)", self._toggle_bold, bold=True)
         self.italic_btn = self._fmt_btn("I", "Italic (Ctrl+I)", self._toggle_italic, italic=True)
         self.under_btn = self._fmt_btn("U", "Underline (Ctrl+U)", self._toggle_underline, underline=True)
         self.strike_btn = self._fmt_btn("S", "Strikethrough", self._toggle_strike)
         for b in (self.bold_btn, self.italic_btn, self.under_btn, self.strike_btn):
-            row.addWidget(b)
+            text_group.btn_layout.addWidget(b)
+        
+        text_group.btn_layout.addSpacing(6)
+        
+        # Color button
+        self._color_btn = self._fmt_btn("A", "Text color", self._pick_color, bold=True)
+        text_group.btn_layout.addWidget(self._color_btn)
 
-        row.addWidget(self._sep())
-
-        # Color
-        color_btn = QToolButton()
-        color_btn.setText("A")
-        f = color_btn.font(); f.setBold(True); color_btn.setFont(f)
-        color_btn.setToolTip("Text color")
-        color_btn.clicked.connect(self._pick_color)
-        self._color_btn = color_btn
-        row.addWidget(color_btn)
-
-        row.addWidget(self._sep())
-
-        # Bullet / Numbered list
-        bullet_btn = QToolButton()
-        bullet_btn.setText("•")
-        bullet_btn.setToolTip("Bulleted list")
-        bullet_btn.clicked.connect(lambda: self._toggle_list(QTextListFormat.ListDisc))
-        row.addWidget(bullet_btn)
-
-        num_btn = QToolButton()
-        num_btn.setText("1.")
-        num_btn.setToolTip("Numbered list")
-        num_btn.clicked.connect(lambda: self._toggle_list(QTextListFormat.ListDecimal))
-        row.addWidget(num_btn)
-
-        row.addWidget(self._sep())
-
-        # Alignment
+        # Highlight (text background) button
+        self._highlight_btn = self._fmt_btn(
+            "🖍", "Highlight (text background color)", self._pick_highlight
+        )
+        text_group.btn_layout.addWidget(self._highlight_btn)
+        
+        # Paragraph Group
+        para_group = home_tab.add_group("Paragraph")
+        
+        # List buttons
+        bullet_btn = self._fmt_btn("•", "Bulleted list",
+                                   lambda: self._toggle_list(QTextListFormat.ListDisc))
+        num_btn = self._fmt_btn("1.", "Numbered list",
+                                lambda: self._toggle_list(QTextListFormat.ListDecimal))
+        para_group.btn_layout.addWidget(bullet_btn)
+        para_group.btn_layout.addWidget(num_btn)
+        para_group.btn_layout.addSpacing(6)
+        
+        # Alignment buttons
         for label, tip, align in [
             ("⇤", "Align left", Qt.AlignLeft),
             ("⇔", "Align center", Qt.AlignCenter),
             ("⇥", "Align right", Qt.AlignRight),
         ]:
-            b = QToolButton()
-            b.setText(label)
-            b.setToolTip(tip)
-            b.clicked.connect(lambda _=False, a=align: self.body_edit.setAlignment(a))
-            row.addWidget(b)
-
-        row.addWidget(self._sep())
-
-        # Clear formatting
-        clear_btn = QToolButton()
-        clear_btn.setText("⌫A")
-        clear_btn.setToolTip("Clear formatting")
-        clear_btn.clicked.connect(self._clear_format)
-        row.addWidget(clear_btn)
-
-        row.addStretch(1)
-
+            b = self._fmt_btn(label, tip, lambda _=False, a=align: self.body_edit.setAlignment(a))
+            para_group.btn_layout.addWidget(b)
+        
+        # === INSERT TAB ===
+        insert_tab = ribbon.add_tab("Insert")
+        
+        # Tables Group
+        tables_group = insert_tab.add_group("Tables")
+        tables_group.add_button(
+            "Table", st.standardIcon(QStyle.SP_FileDialogListView),
+            self._insert_table, large=True, tooltip="Insert a table"
+        )
+        # Row / column / cell editing (operate on the table under the caret)
+        tables_group.add_button(
+            "Insert Row", st.standardIcon(QStyle.SP_ArrowDown),
+            self._table_insert_row, tooltip="Insert a row below the current row"
+        )
+        tables_group.add_button(
+            "Insert Col", st.standardIcon(QStyle.SP_ArrowRight),
+            self._table_insert_col, tooltip="Insert a column to the right"
+        )
+        tables_group.add_button(
+            "Del Row", st.standardIcon(QStyle.SP_ArrowUp),
+            self._table_delete_row, tooltip="Delete the current row"
+        )
+        tables_group.add_button(
+            "Del Col", st.standardIcon(QStyle.SP_ArrowLeft),
+            self._table_delete_col, tooltip="Delete the current column"
+        )
+        tables_group.add_button(
+            "Merge", st.standardIcon(QStyle.SP_DialogApplyButton),
+            self._table_merge_cells, tooltip="Merge the selected cells"
+        )
+        tables_group.add_button(
+            "Split", st.standardIcon(QStyle.SP_DialogResetButton),
+            self._table_split_cell, tooltip="Split the merged cell back into cells"
+        )
+        tables_group.add_button(
+            "Border", st.standardIcon(QStyle.SP_FileDialogDetailedView),
+            self._table_border, tooltip="Set the table border width & color"
+        )
+        
+        # Attachments Group
+        attach_group = insert_tab.add_group("Include")
+        attach_group.add_button(
+            "Attach File", st.standardIcon(QStyle.SP_DialogOpenButton),
+            self._add_attachment, large=True, tooltip="Attach a file to this email"
+        )
+        
+        home_tab.add_spacer()
+        
         # Sync UI buttons when the cursor moves into a different format
         self.body_edit.cursorPositionChanged.connect(self._sync_format_buttons)
         self.body_edit.currentCharFormatChanged.connect(self._sync_format_buttons_from_fmt)
-        return frame
+        
+        return ribbon
+    
+    def _cut(self):
+        self.body_edit.cut()
+    
+    def _copy(self):
+        self.body_edit.copy()
+    
+    def _paste(self):
+        self.body_edit.paste()
 
     def _sep(self):
         sep = QFrame()
@@ -391,6 +459,126 @@ class ComposeDialog(QDialog):
             f"QToolButton {{ color:{color.name()}; font-weight:bold; }}"
         )
 
+    def _pick_highlight(self):
+        """Apply a highlight (text background) color to the selection. A
+        second pick of the same/transparent color clears it."""
+        from PyQt5.QtWidgets import QColorDialog as _QCD
+        cur_fmt = self.body_edit.currentCharFormat()
+        start = cur_fmt.background().color() if cur_fmt.background().style() != 0 else QColor("#ffff00")
+        color = _QCD.getColor(start, self, "Pick highlight color")
+        if not color.isValid():
+            return
+        fmt = QTextCharFormat()
+        # White / near-white means "remove highlight" for convenience.
+        if color.name().lower() in ("#ffffff",):
+            fmt.clearBackground()
+        else:
+            fmt.setBackground(color)
+        self._merge_format(fmt)
+        self._highlight_btn.setStyleSheet(
+            f"QToolButton {{ background:{color.name()}; }}"
+        )
+
+    def _table_under_cursor(self):
+        """Return the QTextTable the caret is currently inside, or None."""
+        return self.body_edit.textCursor().currentTable()
+
+    def _require_table(self):
+        t = self._table_under_cursor()
+        if t is None:
+            self.status_label.setText(
+                "Letakkan kursor di dalam tabel dulu untuk operasi ini."
+            )
+        return t
+
+    def _table_insert_row(self):
+        t = self._require_table()
+        if t is None:
+            return
+        cell = t.cellAt(self.body_edit.textCursor())
+        t.insertRows(cell.row() + 1, 1)
+
+    def _table_insert_col(self):
+        t = self._require_table()
+        if t is None:
+            return
+        cell = t.cellAt(self.body_edit.textCursor())
+        t.insertColumns(cell.column() + 1, 1)
+
+    def _table_delete_row(self):
+        t = self._require_table()
+        if t is None:
+            return
+        cell = t.cellAt(self.body_edit.textCursor())
+        t.removeRows(cell.row(), 1)
+
+    def _table_delete_col(self):
+        t = self._require_table()
+        if t is None:
+            return
+        cell = t.cellAt(self.body_edit.textCursor())
+        t.removeColumns(cell.column(), 1)
+
+    def _table_merge_cells(self):
+        t = self._require_table()
+        if t is None:
+            return
+        cursor = self.body_edit.textCursor()
+        if cursor.hasSelection():
+            t.mergeCells(cursor)
+        else:
+            self.status_label.setText(
+                "Pilih (drag) beberapa sel dulu untuk merge."
+            )
+
+    def _table_split_cell(self):
+        t = self._require_table()
+        if t is None:
+            return
+        cursor = self.body_edit.textCursor()
+        cell = t.cellAt(cursor)
+        # Split back to single cells (1x1 spans).
+        t.splitCell(cell.row(), cell.column(), 1, 1)
+
+    def _table_border(self):
+        """Set the border width and color of the table under the caret."""
+        t = self._require_table()
+        if t is None:
+            return
+        from PyQt5.QtWidgets import QDialog, QGridLayout, QLabel, QSpinBox, \
+            QPushButton, QHBoxLayout
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Table Border")
+        grid = QGridLayout(dlg)
+        grid.addWidget(QLabel("Border width (px):"), 0, 0)
+        width_spin = QSpinBox()
+        width_spin.setRange(0, 10)
+        fmt = t.format()
+        width_spin.setValue(int(fmt.border()) if fmt.border() else 1)
+        grid.addWidget(width_spin, 0, 1)
+        self._border_color = fmt.borderBrush().color() if fmt.borderBrush().style() != 0 else QColor("#000000")
+        color_btn = QPushButton("Pick color...")
+        def _pick():
+            c = QColorDialog.getColor(self._border_color, dlg, "Border color")
+            if c.isValid():
+                self._border_color = c
+                color_btn.setStyleSheet(f"color:{c.name()};")
+        color_btn.clicked.connect(_pick)
+        grid.addWidget(QLabel("Border color:"), 1, 0)
+        grid.addWidget(color_btn, 1, 1)
+        row = QHBoxLayout(); row.addStretch(1)
+        ok = QPushButton("Apply"); ok.setDefault(True); ok.clicked.connect(dlg.accept)
+        cancel = QPushButton("Cancel"); cancel.clicked.connect(dlg.reject)
+        row.addWidget(ok); row.addWidget(cancel)
+        grid.addLayout(row, 2, 0, 1, 2)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        new_fmt = t.format()
+        new_fmt.setBorder(float(width_spin.value()))
+        new_fmt.setBorderBrush(self._border_color)
+        new_fmt.setBorderStyle(QTextFrameFormat.BorderStyle_Solid)
+        t.setFormat(new_fmt)
+
     def _toggle_list(self, style):
         cursor = self.body_edit.textCursor()
         cursor.beginEditBlock()
@@ -420,6 +608,66 @@ class ComposeDialog(QDialog):
         fmt = QTextCharFormat()
         fmt.setFont(QFont("Segoe UI", 10))
         cursor.setCharFormat(fmt)
+
+    def _insert_table(self):
+        """Insert a table at the caret as a native QTextTable so it can be
+        edited afterwards (insert/delete rows & columns, merge/split cells,
+        change border). Includes a border by default."""
+        from PyQt5.QtWidgets import (
+            QDialog, QGridLayout, QLabel, QSpinBox, QPushButton, QHBoxLayout,
+            QCheckBox,
+        )
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Insert Table")
+        layout = QGridLayout(dlg)
+        layout.addWidget(QLabel("Rows:"), 0, 0)
+        rows_spin = QSpinBox(); rows_spin.setRange(1, 50); rows_spin.setValue(2)
+        layout.addWidget(rows_spin, 0, 1)
+        layout.addWidget(QLabel("Columns:"), 1, 0)
+        cols_spin = QSpinBox(); cols_spin.setRange(1, 20); cols_spin.setValue(2)
+        layout.addWidget(cols_spin, 1, 1)
+        layout.addWidget(QLabel("Border (px):"), 2, 0)
+        border_spin = QSpinBox(); border_spin.setRange(0, 10); border_spin.setValue(1)
+        layout.addWidget(border_spin, 2, 1)
+        header_chk = QCheckBox("First row is a header")
+        layout.addWidget(header_chk, 3, 0, 1, 2)
+        btns = QHBoxLayout(); btns.addStretch(1)
+        ok_btn = QPushButton("Insert"); ok_btn.setDefault(True)
+        ok_btn.clicked.connect(dlg.accept); btns.addWidget(ok_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dlg.reject); btns.addWidget(cancel_btn)
+        layout.addLayout(btns, 4, 0, 1, 2)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        rows = rows_spin.value()
+        cols = cols_spin.value()
+        border = float(border_spin.value())
+
+        cursor = self.body_edit.textCursor()
+        fmt = QTextTableFormat()
+        fmt.setBorder(border)
+        fmt.setBorderBrush(QColor("#000000"))
+        fmt.setBorderStyle(QTextFrameFormat.BorderStyle_Solid)
+        fmt.setCellPadding(4)
+        fmt.setCellSpacing(0)
+        # Even column widths that fill the editor width.
+        fmt.setColumnWidthConstraints(
+            [QTextLength(QTextLength.PercentageLength, 100.0 / cols)] * cols
+        )
+        table = cursor.insertTable(rows, cols, fmt)
+
+        if header_chk.isChecked():
+            # Bold + light shading for the header row.
+            for c in range(cols):
+                cell = table.cellAt(0, c)
+                cfmt = cell.format()
+                cfmt.setBackground(QColor("#f2f2f2"))
+                cell.setFormat(cfmt)
+                ccur = cell.firstCursorPosition()
+                bold = QTextCharFormat(); bold.setFontWeight(QFont.Bold)
+                ccur.mergeBlockCharFormat(bold)
+        # Put the caret in the first cell, ready to type.
+        self.body_edit.setTextCursor(table.cellAt(0, 0).firstCursorPosition())
 
     def _merge_format(self, fmt: QTextCharFormat):
         cursor = self.body_edit.textCursor()
@@ -481,6 +729,38 @@ class ComposeDialog(QDialog):
             or "<span" in s.lower() or "<div" in s.lower()
         )
 
+    @staticmethod
+    def _sanitize_signature_html(sig: str) -> str:
+        """Strip baked-in background colors from a signature.
+
+        Outlook/webmail signatures often carry `background-color: white`
+        (and `!important`) on every paragraph/div/table. Inside our editor
+        — whose base is a faint gray — those opaque white runs paint as
+        visible white "cards"/boxes behind lines like "Best Regards,".
+        We remove the background-color declarations so the signature sits
+        flush on whatever surface renders it (editor or recipient client).
+        The pristine copy used for sending is sanitized the same way so the
+        boxes never reach the recipient either.
+        """
+        import re
+        if not sig:
+            return sig
+        # Remove `background-color: <value>;` (incl. !important) up to the
+        # next style delimiter. Greedy stop at ; } or quote so the whole
+        # declaration (e.g. "white !important") is removed, not just the key.
+        sig = re.sub(
+            r'background-color\s*:\s*[^;}"\']*;?',
+            '', sig, flags=re.IGNORECASE,
+        )
+        # Remove `background: <color>` shorthand only when it's purely a
+        # color (avoid nuking gradients/images, which signatures rarely use).
+        sig = re.sub(
+            r'background\s*:\s*(?:#[0-9a-fA-F]{3,8}|rgb[a]?\([^)]*\)|white|transparent)'
+            r'[^;}"\']*;?',
+            '', sig, flags=re.IGNORECASE,
+        )
+        return sig
+
     def _apply_signature(self, *_):
         """Insert the signature into a fresh compose body.
 
@@ -515,7 +795,12 @@ class ComposeDialog(QDialog):
         from PyQt5.QtGui import QTextCharFormat, QTextBlockFormat, QFont
 
         # Remember the original signature so we can restore it at send time.
-        self._raw_signature_html = sig if self._is_html(sig) else None
+        # Sanitize it (strip baked-in background colors) so neither the editor
+        # nor the recipient sees white "card" boxes behind the text.
+        self._raw_signature_html = (
+            self._sanitize_signature_html(sig) if self._is_html(sig) else None
+        )
+        sig_html = self._raw_signature_html if self._is_html(sig) else sig
 
         cursor = self.body_edit.textCursor()
         cursor.movePosition(cursor.End)
@@ -525,12 +810,10 @@ class ComposeDialog(QDialog):
         # why the user had to press Enter twice to "escape" the formatting.)
         if self._is_html(sig):
             cursor.insertBlock()
-            # Open marker — survives Qt's toHtml() roundtrip as plain text
-            cursor.insertText(self.SIG_MARKER_OPEN)
-            cursor.insertBlock()
-            cursor.insertHtml(sig)
-            cursor.insertBlock()
-            cursor.insertText(self.SIG_MARKER_CLOSE)
+            # Markers are embedded INLINE at the signature's edges and the
+            # whole thing is inserted in ONE call, so they never get their
+            # own blank line above the signature.
+            cursor.insertHtml(self._wrap_signature_with_markers(sig_html))
         else:
             cursor.insertText("\n-- \n" + sig + "\n")
 
@@ -559,7 +842,15 @@ class ComposeDialog(QDialog):
         """Insert signature at the TOP of the body, before the quoted
         block. This is what Outlook does for replies/forwards — user
         types above the signature, signature sits above the quoted
-        original, original is at the bottom."""
+        original, original is at the bottom.
+
+        We rebuild the whole body as ONE HTML string and setHtml() it once.
+        Inserting the signature into the already-present quoted content made
+        the signature's first block inherit the quoted separator's block
+        format (gray background + left padding) — which showed up as a gray
+        box behind "Best Regards" and pushed it to the right. Building the
+        body in one pass keeps each section's formatting isolated.
+        """
         sig = self._signature_for_current()
         if not sig:
             return
@@ -570,21 +861,38 @@ class ComposeDialog(QDialog):
 
         from PyQt5.QtGui import QTextCharFormat, QTextBlockFormat, QFont
 
-        self._raw_signature_html = sig if self._is_html(sig) else None
+        self._raw_signature_html = (
+            self._sanitize_signature_html(sig) if self._is_html(sig) else None
+        )
+        sig_html = self._raw_signature_html if self._is_html(sig) else sig
 
-        cursor = self.body_edit.textCursor()
-        cursor.movePosition(cursor.Start)
-
-        # One empty line at top, then signature with markers, then a separator.
         if self._is_html(sig):
-            cursor.insertBlock()
-            cursor.insertText(self.SIG_MARKER_OPEN)
-            cursor.insertBlock()
-            cursor.insertHtml(sig)
-            cursor.insertBlock()
-            cursor.insertText(self.SIG_MARKER_CLOSE)
-            cursor.insertBlock()
+            # Use the PRISTINE quoted HTML (stashed at prefill) rather than
+            # re-serializing the editor — that round-trip bakes the quoted
+            # separator's gray box/padding into block formats which then leak
+            # into the signature.
+            quoted_html = getattr(self, "_reply_quoted_html", None)
+            if quoted_html is None:
+                quoted_html = self.body_edit.toHtml()
+            wrapped_sig = self._wrap_signature_with_markers(sig_html)
+            # One empty typing line, then the signature on its own clean
+            # blocks, then the quoted original. The quoted block already
+            # begins with its own <hr> + sender box (built in
+            # _quote_body_html), which is the visible divider — so we don't
+            # add another rule here.
+            combined = (
+                '<div style="font-family:\'Segoe UI\',sans-serif;'
+                'font-size:10pt;color:#201f1e;">'
+                '<p style="margin:0;"><br></p>'
+                f'<div style="margin:0;background:transparent;">{wrapped_sig}</div>'
+                '</div>'
+                f'{quoted_html}'
+            )
+            self.body_edit.setHtml(combined)
+            cursor = self.body_edit.textCursor()
         else:
+            cursor = self.body_edit.textCursor()
+            cursor.movePosition(cursor.Start)
             cursor.insertText("\n-- \n" + sig + "\n\n")
 
         # Caret to the very top + default char format so the user types
@@ -604,27 +912,95 @@ class ComposeDialog(QDialog):
 
         self._hide_marker_runs()
 
-    # Plain-text markers we plant around the signature so we can splice
-    # the original (pristine) signature HTML back in at send time.
-    SIG_MARKER_OPEN = "\u2063PMSIG_OPEN\u2063"   # invisible separator wrapped
-    SIG_MARKER_CLOSE = "\u2063PMSIG_CLOSE\u2063"
+    # Invisible plain-text tokens we plant around the signature so we can
+    # splice the original (pristine) signature HTML back in at send time.
+    # NOTE: these are bare tokens (no angle brackets). Qt's toHtml() escapes
+    # "<!--...-->" into "&lt;!--...--&gt;", which broke the old comment-style
+    # markers — the splice could never find them, so they leaked into the
+    # sent mail as visible text. Bare tokens survive the roundtrip verbatim.
+    SIG_MARKER_OPEN = "PMSIG_OPEN_5f3a9c"
+    SIG_MARKER_CLOSE = "PMSIG_CLOSE_5f3a9c"
+    # Invisible inline style for the marker runs. The negative letter-spacing
+    # cancels out the ~1px the (1px, transparent) marker glyph would otherwise
+    # occupy, so placing a marker at the START of a line does NOT shift the
+    # first visible word to the right. This lets us keep OPEN before all the
+    # signature text (so the send-time splice captures the WHOLE signature)
+    # while still keeping "Best Regards," flush-left, aligned with the rest.
+    _MARKER_SPAN_OPEN = (
+        '<span style="font-size:1px;color:transparent;'
+        'letter-spacing:-1px;mso-hide:all;">'
+    )
+    _MARKER_SPAN_CLOSE = "</span>"
+
+    def _insert_marker(self, cursor, token: str):
+        """Insert a marker token as an invisible inline run.
+
+        We insert it via HTML so it carries a transparent/hidden char format
+        in the document (user never sees it) yet survives toHtml() as plain
+        token text we can search for when splicing the pristine signature.
+        """
+        cursor.insertHtml(self._MARKER_SPAN_OPEN + token + self._MARKER_SPAN_CLOSE)
+
+    def _wrap_signature_with_markers(self, sig_html: str) -> str:
+        """Return signature HTML with invisible marker tokens embedded INLINE
+        inside the signature's first and last block elements.
+
+        The OPEN token goes at the START of the first <p> (before any visible
+        text) so the send-time splice replaces the ENTIRE signature — if OPEN
+        sat AFTER "Best Regards,", the splice would leave that line in place
+        and then insert the pristine signature (which also has "Best Regards,")
+        right after it, producing a DUPLICATE. The marker span uses negative
+        letter-spacing so being at the line start doesn't push the text right.
+        CLOSE goes just before the LAST </p>. Falls back to a plain inline
+        wrap for signatures without <p> blocks.
+        """
+        import re
+        open_run = self._MARKER_SPAN_OPEN + self.SIG_MARKER_OPEN + self._MARKER_SPAN_CLOSE
+        close_run = self._MARKER_SPAN_OPEN + self.SIG_MARKER_CLOSE + self._MARKER_SPAN_CLOSE
+
+        m = re.search(r'<p\b[^>]*>', sig_html, re.IGNORECASE)
+        last_close = sig_html.lower().rfind('</p>')
+        if m and last_close >= 0 and last_close >= m.end():
+            # OPEN right after the first <p ...> (before the first word),
+            # CLOSE just before the last </p>. The whole signature, including
+            # "Best Regards,", now sits BETWEEN the markers.
+            html = sig_html[:m.end()] + open_run + sig_html[m.end():]
+            last_close = html.lower().rfind('</p>')
+            return html[:last_close] + close_run + html[last_close:]
+        # Fallback: no <p> blocks — wrap inline (may create a line, but these
+        # signatures are rare and usually single-line plain-ish HTML).
+        return open_run + sig_html + close_run
 
     def _hide_marker_runs(self):
-        """Find the marker text in the document and apply a tiny / invisible
-        format so the user doesn't see the literal token. The markers stay
-        in the underlying document so toPlainText() and toHtml() can still
-        find them."""
-        from PyQt5.QtGui import QTextCharFormat, QColor
+        """Belt-and-braces: force any run whose text contains a marker token
+        to be transparent + 1pt, in case Qt normalized away the inline style
+        we inserted. Markers should never be visible to the user."""
+        from PyQt5.QtGui import QTextCursor, QTextCharFormat, QColor
         doc = self.body_edit.document()
-        for marker in (self.SIG_MARKER_OPEN, self.SIG_MARKER_CLOSE):
-            cur = doc.find(marker)
-            while cur is not None and not cur.isNull():
-                fmt = QTextCharFormat()
-                # 1pt + transparent foreground = effectively invisible
-                fmt.setFontPointSize(1)
-                fmt.setForeground(QColor(255, 255, 255, 0))
-                cur.mergeCharFormat(fmt)
-                cur = doc.find(marker, cur)
+        for token in (self.SIG_MARKER_OPEN, self.SIG_MARKER_CLOSE):
+            block = doc.begin()
+            while block.isValid():
+                text = block.text()
+                idx = text.find(token)
+                if idx >= 0:
+                    start = block.position() + idx
+                    cur = QTextCursor(doc)
+                    cur.setPosition(start)
+                    cur.setPosition(start + len(token), QTextCursor.KeepAnchor)
+                    fmt = QTextCharFormat()
+                    fmt.setForeground(QColor(0, 0, 0, 0))  # transparent
+                    fmt.setFontPointSize(1)
+                    cur.mergeCharFormat(fmt)
+                block = block.next()
+
+    def _update_body_height(self):
+        """Adjust body height to fit content so container scroll handles all scrolling."""
+        doc = self.body_edit.document()
+        height = int(doc.size().height()) + 40
+        # Allow up to 100,000 pixels height for very long reply threads
+        height = max(300, min(height, 100000))
+        self.body_edit.setMinimumHeight(height)
+        self.body_edit.setMaximumHeight(height)
 
     def _splice_pristine_signature(self, body_html: str) -> str:
         """Replace the signature region in Qt-serialized HTML with the
@@ -645,23 +1021,28 @@ class ComposeDialog(QDialog):
         if open_tok not in body_html or close_tok not in body_html:
             return self._strip_markers(body_html)
 
-        # Greedy: from the first <p ...> wrapping OPEN to the closing
-        # </p> after CLOSE — replace the whole block with raw signature.
-        # Build a regex that finds: optional <p ...>?...OPEN...CLOSE...</p>?
-        # We anchor on the markers themselves; surrounding tags are
-        # captured if present.
+        # Greedy: from the <p ...> wrapping OPEN to the closing </p> after
+        # CLOSE — replace the whole block with the raw signature. The tokens
+        # live inside invisible <span> wrappers, so allow optional span tags
+        # immediately around each token.
+        span_open = r'(?:<span[^>]*>\s*)?'
+        span_close = r'(?:\s*</span>)?'
         pattern = re.compile(
-            r'(<p[^>]*>\s*)?'                  # optional opening <p>
-            + re.escape(open_tok)
-            + r'.*?'                            # everything in between
-            + re.escape(close_tok)
-            + r'(\s*</p>)?',                   # optional closing </p>
+            r'(<p[^>]*>\s*)?'  # optional opening <p>
+            +span_open
+            +re.escape(open_tok)
+            +span_close
+            +r'.*?'  # everything in between (the rendered signature)
+            +span_open
+            +re.escape(close_tok)
+            +span_close
+            +r'(\s*</p>)?',  # optional closing </p>
             re.DOTALL | re.IGNORECASE,
         )
         replacement = (
             '<div class="pymail-signature">'
-            + self._raw_signature_html
-            + '</div>'
+            +self._raw_signature_html
+            +'</div>'
         )
         new_html, n = pattern.subn(replacement, body_html, count=1)
         if n == 0:
@@ -671,11 +1052,16 @@ class ComposeDialog(QDialog):
         return self._strip_markers(new_html)
 
     def _strip_markers(self, html: str) -> str:
-        return (
-            html
-            .replace(self.SIG_MARKER_OPEN, "")
-            .replace(self.SIG_MARKER_CLOSE, "")
-        )
+        import re
+        # Remove the invisible span-wrapped tokens (and any bare leftovers).
+        for token in (self.SIG_MARKER_OPEN, self.SIG_MARKER_CLOSE):
+            html = re.sub(
+                r'(?:<span[^>]*>\s*)?'
+                +re.escape(token)
+                +r'(?:\s*</span>)?',
+                '', html, flags=re.IGNORECASE,
+            )
+        return html
 
     @staticmethod
     def _sig_plain_excerpt(sig: str) -> str:
@@ -693,6 +1079,9 @@ class ComposeDialog(QDialog):
     def _body_has_rich_content(self) -> bool:
         """True if the body has any non-default formatting or images."""
         from PyQt5.QtGui import QFont
+        html = (self.body_edit.toHtml() or "").lower()
+        if any(tag in html for tag in ("<table", "<tr", "<td", "<th", "<ul", "<ol", "<li")):
+            return True
         doc = self.body_edit.document()
         for i in range(doc.blockCount()):
             block = doc.findBlockByNumber(i)
@@ -743,8 +1132,15 @@ class ComposeDialog(QDialog):
         body_html = p.get("body_html")
         body_plain = p.get("body")  # legacy plain-text path
         if body_html:
+            # Stash the PRISTINE quoted HTML. _prepend_signature_for_reply
+            # uses this directly instead of re-serializing the editor — a
+            # round-trip through toHtml() bakes the quoted separator's gray
+            # box/padding into block formats that then bleed into the
+            # signature (gray box + rightward shift behind "Best Regards").
+            self._reply_quoted_html = body_html
             self.body_edit.setHtml(body_html)
         elif body_plain is not None:
+            self._reply_quoted_html = None
             self.body_edit.setPlainText(body_plain)
 
         # Forwarded attachments — attach binary payloads from the DB
@@ -929,6 +1325,16 @@ class ComposeDialog(QDialog):
                 pass
             self.draft_id = None
 
+        # If account is set to queue-first (default), stop here.
+        # OutboxFlushWorker will send it during the next Send/Receive.
+        if not account.get("send_immediately"):
+            self._sent = True
+            self.sent.emit(account_id)
+            # No blocking popup — clicking Send should feel instant. The
+            # dialog just closes and the message is safely in the Outbox.
+            self.accept()
+            return
+
         self.status_label.setText("Queued in Outbox, sending...")
         self.setCursor(Qt.WaitCursor)
         self.worker = SendWorker(account, msg)
@@ -999,13 +1405,20 @@ class ComposeDialog(QDialog):
             f'{account["name"]} <{account["email"]}>'
             if account.get("name") else account["email"]
         )
+        # Strip signature splice markers from the stored body so a re-opened
+        # draft never shows the raw tokens. Covers both the current bare
+        # tokens and legacy comment-style markers from older drafts.
+        body_plain = self.body_edit.toPlainText()
+        for tok in (self.SIG_MARKER_OPEN, self.SIG_MARKER_CLOSE,
+                    "<!--PMSIG_OPEN-->", "<!--PMSIG_CLOSE-->"):
+            body_plain = body_plain.replace(tok, "")
         return {
             "from": from_addr,
             "to": self.to_edit.text().strip(),
             "cc": self.cc_edit.text().strip(),
             "bcc": self.bcc_edit.text().strip(),
             "subject": self.subject_edit.text().strip(),
-            "body": self.body_edit.toPlainText(),
+            "body": body_plain,
         }
 
     def save_draft(self) -> bool:
@@ -1038,6 +1451,30 @@ class ComposeDialog(QDialog):
                     lambda: self.status_label.setText("")
                     if not self._sent else None,
                 )
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Open ready to type — like Outlook. Put keyboard focus in the body
+        # with the caret on the top empty line (above the signature, and
+        # above the quoted block for replies/forwards). Only do this once,
+        # and never for a re-opened draft (respect the saved caret).
+        if getattr(self, "_focused_once", False):
+            return
+        self._focused_once = True
+        from PyQt5.QtCore import QTimer
+        # Defer to after the dialog is fully shown so focus/caret stick.
+        QTimer.singleShot(0, self._focus_body_for_typing)
+
+    def _focus_body_for_typing(self):
+        """Place the caret on the first empty line and focus the editor."""
+        # For a re-opened draft, just give focus without moving the caret —
+        # the body is the user's own saved content.
+        if not self.draft_id:
+            cursor = self.body_edit.textCursor()
+            cursor.movePosition(cursor.Start)
+            self.body_edit.setTextCursor(cursor)
+        self.body_edit.setFocus()
+        self.body_edit.ensureCursorVisible()
 
     def closeEvent(self, event):
         # If user closes the dialog without sending, save anything in flight

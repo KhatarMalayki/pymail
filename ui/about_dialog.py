@@ -47,7 +47,8 @@ class _DownloadWorker(QThread):
 
 
 class AboutDialog(QDialog):
-    def __init__(self, parent=None, license_payload: dict | None = None):
+
+    def __init__(self, parent=None, license_payload: dict | None=None):
         super().__init__(parent)
         self.license_payload = license_payload or {}
         self.manifest = None
@@ -95,13 +96,16 @@ class AboutDialog(QDialog):
         self.status_label.setWordWrap(True)
         info.addRow("Status:", self.status_label)
 
-        manifest_url = updater.get_manifest_url()
-        url_label = QLabel(f'<a href="{manifest_url}">{manifest_url}</a>')
+        manifest_urls = updater.get_manifest_urls()
+        links = "<br/>".join(
+            f'<a href="{u}">{u}</a>' for u in manifest_urls
+        )
+        url_label = QLabel(links)
         url_label.setOpenExternalLinks(True)
         url_label.setTextFormat(Qt.RichText)
         url_label.setWordWrap(True)
         url_label.setStyleSheet("color:#666; font-size: 11px;")
-        info.addRow("Update channel:", url_label)
+        info.addRow("Update channel(s):", url_label)
 
         # License info
         if self.license_payload:

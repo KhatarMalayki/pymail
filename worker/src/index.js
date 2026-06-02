@@ -27,8 +27,11 @@
  *     Body: {license_id}
  *
  *   POST /admin/push-version  (admin auth required)
- *     Body: {version}          // e.g. "1.2.38"
- *     Effect: sets allowed_version on every active user record.
+ *     Body: {version, exclude_machine_id?, exclude_license_id?}
+ *     Effect: sets allowed_version on every user record, EXCEPT the admin's
+ *             own machine (identified by exclude_machine_id/exclude_license_id),
+ *             whose allowed_version is cleared to null so it is never gated
+ *             and always tracks the newest build.
  *             Clients only auto-update when their allowed_version > current.
  *
  * Storage layout in R2 bucket:
@@ -475,15 +478,28 @@ async function handleAdminPushVersion(request, env) {
   const body = await request.json().catch(() => ({}));
   const version = String(body.version || "").trim();
   if (!version) return json({ error: "version required" }, 400);
+  const excludeMachineId = String(body.exclude_machine_id || "").trim();
+  const excludeLicenseId = String(body.exclude_license_id || "").trim();
 
   const data = await loadUsers(env);
   let updated = 0;
+  let skipped = 0;
   for (const user of data.users) {
+    const isAdminSelf =
+      (excludeMachineId && user.machine_id === excludeMachineId) ||
+      (excludeLicenseId && user.license_id === excludeLicenseId);
+    if (isAdminSelf) {
+      // The admin's own machine is never gated: clear any restriction so it
+      // always tracks the newest build (code change / manifest update).
+      user.allowed_version = null;
+      skipped++;
+      continue;
+    }
     user.allowed_version = version;
     updated++;
   }
   await saveUsers(env, data);
-  return json({ ok: true, version, updated });
+  return json({ ok: true, version, updated, skipped });
 }
 
 async function handleAdminDelete(request, env) {

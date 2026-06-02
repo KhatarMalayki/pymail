@@ -201,12 +201,25 @@ def admin_delete(token: str, license_id: str) -> dict:
     )
 
 
-def admin_push_version(token: str, version: str) -> dict:
+def admin_push_version(
+    token: str, version: str,
+    exclude_machine_id: str="", exclude_license_id: str="",
+) -> dict:
     """Set allowed_version on all user records. Users only auto-update
-    to versions that have been pushed by the admin."""
+    to versions that have been pushed by the admin.
+
+    The admin's own machine (exclude_machine_id / exclude_license_id) is
+    skipped and its restriction cleared, so the developer box always tracks
+    the newest build instead of being pinned to the pushed version.
+    """
+    body = {"version": version}
+    if exclude_machine_id:
+        body["exclude_machine_id"] = exclude_machine_id
+    if exclude_license_id:
+        body["exclude_license_id"] = exclude_license_id
     return _post(
         "/admin/push-version",
-        {"version": version},
+        body,
         headers=admin_headers(token),
     )
 

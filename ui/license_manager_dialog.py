@@ -433,7 +433,8 @@ class LicenseManagerDialog(QDialog):
             self, "Push version to all users",
             "Enter the version to allow (e.g. 1.2.38).\n\n"
             "Users will only see and auto-install the update\n"
-            "after you push it here.",
+            "after you push it here. This admin machine is\n"
+            "excluded and always tracks the latest build.",
             QLineEdit.Normal,
             __version__,
         )
@@ -443,13 +444,37 @@ class LicenseManagerDialog(QDialog):
         self.push_ver_btn.setEnabled(False)
         self.status_label.setText(f"Pushing v{ver} to all users...")
 
+        exclude_mid, exclude_lid = self._self_identity()
+
         def _do():
-            license_client.admin_push_version(self._token, ver)
+            license_client.admin_push_version(
+                self._token, ver,
+                exclude_machine_id=exclude_mid,
+                exclude_license_id=exclude_lid,
+            )
 
         self._push_worker = _SimpleWorker(_do)
         self._push_worker.done.connect(lambda: self._on_push_done(ver))
         self._push_worker.failed.connect(self._on_push_failed)
         self._push_worker.start()
+
+    @staticmethod
+    def _self_identity() -> tuple[str, str]:
+        """This admin machine's own (machine_id, license_id) so the Worker
+        can skip the admin's row when pushing a version to everyone."""
+        machine_id = ""
+        license_id = ""
+        try:
+            from core import license as licmod
+            machine_id = licmod.get_machine_id() or ""
+            obj = licmod.load_license()
+            if obj:
+                license_id = str(
+                    (obj.get("payload") or {}).get("license_id") or ""
+                )
+        except Exception:
+            pass
+        return machine_id, license_id
 
     def _on_push_done(self, ver: str):
         self.push_ver_btn.setEnabled(True)
@@ -457,8 +482,11 @@ class LicenseManagerDialog(QDialog):
         QMessageBox.information(
             self, "Version pushed",
             f"All registered users are now allowed to update to v{ver}.\n\n"
-            f"They will receive the update on next launch.",
+            f"They will receive the update on next launch.\n\n"
+            f"This admin machine was excluded and stays on \"(all)\" so it "
+            f"always tracks the newest build.",
         )
+        self._load()
 
     def _on_push_failed(self, err: str):
         self.push_ver_btn.setEnabled(True)

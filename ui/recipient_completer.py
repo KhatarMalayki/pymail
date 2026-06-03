@@ -2,17 +2,21 @@
 Autocomplete for comma-separated recipient fields (To, Cc, Bcc).
 
 The default QCompleter completes the entire field text, which is wrong when
-the user types multiple recipients separated by commas. We do two things:
+the user types multiple recipients separated by commas — picking a suggestion
+would wipe out every recipient typed before the last comma, so the field
+could only ever end up with a single address. We fix this in two places:
 
     1. Override splitPath() so the completer matches only the substring
        AFTER the last comma — what the user is currently typing.
-    2. Hook into the activated signal manually to insert the chosen
-       completion at the right spot, replacing only the last segment and
-       appending ", " for the next entry.
+    2. Override pathFromIndex() so the text QLineEdit writes back keeps
+       everything before the last comma intact, replaces only the segment
+       being typed with the chosen address, and appends ", " so the user
+       can keep adding recipients.
 
-We deliberately DO NOT override pathFromIndex() because that would cause
-double-insertion when the user clicks a suggestion (Qt fires both the
-internal pathFromIndex flow AND the activated signal in some cases).
+QLineEdit sets its text to completer.pathFromIndex(index) when a suggestion
+is selected, so reconstructing the full field there is what actually makes
+multi-recipient autocomplete work. We do NOT also hook the activated signal,
+which would double-insert the chosen address.
 """
 from PyQt5.QtCore import Qt, QStringListModel
 from PyQt5.QtWidgets import QCompleter, QLineEdit
@@ -32,6 +36,28 @@ class _RecipientCompleter(QCompleter):
             return [path.strip()]
         return [path[last_comma + 1:].strip()]
 
+    def pathFromIndex(self, index) -> str:
+        """Build the text QLineEdit writes back when a suggestion is picked.
+
+        Keep everything before the last comma, swap the segment currently
+        being typed for the chosen address, and append ", " for the next one.
+        """
+        completion = super().pathFromIndex(index)
+        widget = self.widget()
+        if not isinstance(widget, QLineEdit):
+            return completion
+        current = widget.text()
+        suffix = completion + ", "
+        # Qt calls pathFromIndex more than once per selection; on the later
+        # call(s) the chosen address is already the trailing segment, so
+        # splicing again would duplicate it. Stay idempotent.
+        if current.endswith(suffix):
+            return current
+        last_comma = current.rfind(",")
+        if last_comma == -1:
+            return suffix
+        return current[: last_comma + 1] + " " + suffix
+
 
 def attach_to(line_edit: QLineEdit, items: list[str]) -> _RecipientCompleter:
     """Attach a smart multi-recipient completer to a QLineEdit.
@@ -40,25 +66,6 @@ def attach_to(line_edit: QLineEdit, items: list[str]) -> _RecipientCompleter:
     """
     completer = _RecipientCompleter(items, line_edit)
     line_edit.setCompleter(completer)
-
-    def _on_activated(text: str):
-        # Replace just the segment after the last comma with the chosen text,
-        # then append ", " so the user can keep typing the next address.
-        current = line_edit.text()
-        last_comma = current.rfind(",")
-        if last_comma == -1:
-            new_text = text + ", "
-        else:
-            new_text = current[: last_comma + 1] + " " + text + ", "
-        # Block signals briefly so this programmatic edit doesn't re-trigger
-        # the completer popup mid-insertion.
-        line_edit.blockSignals(True)
-        line_edit.setText(new_text)
-        line_edit.blockSignals(False)
-        line_edit.setCursorPosition(len(new_text))
-
-    # `activated[str]` is the safe overload that always fires once per pick.
-    completer.activated[str].connect(_on_activated)
     return completer
 
 

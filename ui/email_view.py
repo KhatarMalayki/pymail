@@ -6,6 +6,7 @@ import tempfile
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextBrowser, QFrame,
     QPushButton, QListWidget, QListWidgetItem, QFileDialog, QMessageBox,
+    QMenu,
 )
 from PyQt5.QtCore import Qt, QUrl, pyqtSignal, QSize, QRect
 from PyQt5.QtGui import (
@@ -138,12 +139,14 @@ class EmailView(QWidget):
         )
         a_layout = QVBoxLayout(self.att_frame)
         a_layout.setContentsMargins(14, 6, 14, 6)
-        att_label = QLabel("📎 Attachments (double-click to save):")
+        att_label = QLabel("📎 Attachments (double-click to open, right-click to save):")
         att_label.setStyleSheet("color:#604000;")
         a_layout.addWidget(att_label)
         self.att_list = QListWidget()
         self.att_list.setMaximumHeight(80)
-        self.att_list.itemDoubleClicked.connect(self._save_attachment)
+        self.att_list.itemDoubleClicked.connect(self._open_attachment)
+        self.att_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.att_list.customContextMenuRequested.connect(self._att_context_menu)
         a_layout.addWidget(self.att_list)
         layout.addWidget(self.att_frame)
         self.att_frame.setVisible(False)
@@ -313,6 +316,43 @@ class EmailView(QWidget):
             return dt.strftime("%a, %d %b %Y, %H:%M")
         except Exception:
             return iso[:16]
+
+    def _att_context_menu(self, pos):
+        item = self.att_list.itemAt(pos)
+        if item is None:
+            return
+        menu = QMenu(self)
+        open_act = menu.addAction("Open")
+        save_act = menu.addAction("Save As…")
+        chosen = menu.exec_(self.att_list.mapToGlobal(pos))
+        if chosen == open_act:
+            self._open_attachment(item)
+        elif chosen == save_act:
+            self._save_attachment(item)
+
+    def _open_attachment(self, item: QListWidgetItem):
+        """Write the attachment to a temp file and open it with the OS default
+        application (e.g. .xlsx → Excel, .pdf → PDF viewer)."""
+        att_id = item.data(Qt.UserRole)
+        att = database.get_attachment(att_id)
+        if not att:
+            return
+        name = os.path.basename((att.get("filename") or "").strip()) or "attachment"
+        tmp_dir = os.path.join(tempfile.gettempdir(), "RunLabMail", "attachments")
+        try:
+            os.makedirs(tmp_dir, exist_ok=True)
+            path = os.path.join(tmp_dir, name)
+            with open(path, "wb") as f:
+                f.write(att["data"])
+        except Exception as e:
+            QMessageBox.warning(self, "Open failed", f"Could not open attachment:\n{e}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+            QMessageBox.warning(
+                self, "No application",
+                f"Windows could not find an application to open\n{name}.\n\n"
+                f"Right-click the attachment and choose \"Save As…\" instead.",
+            )
 
     def _save_attachment(self, item: QListWidgetItem):
         att_id = item.data(Qt.UserRole)

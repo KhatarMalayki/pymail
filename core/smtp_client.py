@@ -185,10 +185,55 @@ def build_message(
 
 
 def send_email(account: dict, msg: EmailMessage) -> bytes:
-    """Send the email and return the raw bytes of the sent message."""
+    """Send the email and return the raw bytes of the sent message.
+
+    Uses explicit envelope recipients (To + Cc + Bcc) and sendmail()
+    so that BCC recipients receive the email and partial failures are
+    reported per-recipient instead of silently swallowed.
+
+    Returns the raw bytes of the sent message (Bcc header stripped).
+    Raises SMTPError with details of any refused recipients.
+    """
+    from email.utils import getaddresses
+
+    # Collect ALL envelope recipients (To + Cc + Bcc)
+    all_recipient_headers = []
+    for hdr in ("To", "Cc", "Bcc"):
+        vals = msg.get_all(hdr, [])
+        all_recipient_headers.extend(vals)
+    all_recipients = [
+        addr for _name, addr in getaddresses(all_recipient_headers) if addr
+    ]
+
+    if not all_recipients:
+        raise SMTPError("No recipients specified")
+
+    # Determine sender envelope address
+    from_header = msg.get("From", "")
+    _from_name, from_addr = getaddresses([from_header])[0] if from_header else ("", "")
+    if not from_addr:
+        from_addr = account.get("email", "")
+
+    # Build a copy WITHOUT the Bcc header for the wire (standard practice)
+    import copy
+    msg_copy = copy.copy(msg)
+    if msg_copy["Bcc"]:
+        del msg_copy["Bcc"]
+
     server = _connect(account)
+    refused = {}
     try:
-        server.send_message(msg)
+        refused = server.sendmail(from_addr, all_recipients, msg_copy.as_bytes())
+    except smtplib.SMTPRecipientsRefused as e:
+        raise SMTPError(
+            "All recipients refused:\n"
+            + "\n".join(f"  {addr}: {code} {errmsg.decode(errors='replace')}"
+                        for addr, (code, errmsg) in e.recipients.items())
+        ) from e
+    except smtplib.SMTPSenderRefused as e:
+        raise SMTPError(f"Sender refused: {e.smtp_error.decode(errors='replace')}") from e
+    except smtplib.SMTPDataError as e:
+        raise SMTPError(f"Data error: {e.smtp_error.decode(errors='replace')}") from e
     except smtplib.SMTPException as e:
         raise SMTPError(f"Send failed: {e}") from e
     finally:
@@ -196,4 +241,16 @@ def send_email(account: dict, msg: EmailMessage) -> bytes:
             server.quit()
         except Exception:
             pass
-    return msg.as_bytes()
+
+    # If some (but not all) recipients were refused, raise with details
+    if refused:
+        details = "\n".join(
+            f"  {addr}: {code} {errmsg.decode(errors='replace')}"
+            for addr, (code, errmsg) in refused.items()
+        )
+        raise SMTPError(
+            f"Email sent to {len(all_recipients) - len(refused)} recipient(s), "
+            f"but {len(refused)} recipient(s) were refused:\n{details}"
+        )
+
+    return msg_copy.as_bytes()

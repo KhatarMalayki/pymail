@@ -12,7 +12,7 @@ Unread rows have:
   - Bold sender + subject
   - Date in primary color
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from PyQt5.QtCore import Qt, QSize, QRect, QModelIndex, pyqtSignal
 from PyQt5.QtGui import (
     QPainter, QColor, QFont, QFontMetrics, QPainterPath, QPen, QBrush,
@@ -344,7 +344,10 @@ class EmailItemDelegate(QStyledItemDelegate):
         if not iso:
             return ""
         try:
-            dt = datetime.fromisoformat(iso.replace("Z", "").replace("+00:00", ""))
+            # Parse the ISO timestamp, interpreting 'Z' as UTC
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            # Convert to local time so the UI shows the user's timezone
+            dt = dt.astimezone()
             today = datetime.now().date()
             if dt.date() == today:
                 return dt.strftime("%H:%M")

@@ -10,11 +10,13 @@ the user types multiple recipients separated by commas. We do two things:
        completion at the right spot, replacing only the last segment and
        appending ", " for the next entry.
 
-We deliberately DO NOT override pathFromIndex() because that would cause
-double-insertion when the user clicks a suggestion (Qt fires both the
-internal pathFromIndex flow AND the activated signal in some cases).
+We override pathFromIndex() so Qt itself handles inserting the properly
+concatenated string. To avoid double-insertion (which happens if pathFromIndex
+reads the widget's text while QCompleter is natively modifying it during
+popup navigation), we read the base text from a cache that only updates on
+actual user typing (`textEdited`).
 """
-from PyQt5.QtCore import Qt, QStringListModel
+from PyQt5.QtCore import Qt, QStringListModel, QModelIndex
 from PyQt5.QtWidgets import QCompleter, QLineEdit
 
 
@@ -24,6 +26,7 @@ class _RecipientCompleter(QCompleter):
         self.setCaseSensitivity(Qt.CaseInsensitive)
         self.setFilterMode(Qt.MatchContains)
         self.setCompletionMode(QCompleter.PopupCompletion)
+        self.state_cache = {"user_text": ""}
 
     def splitPath(self, path: str) -> list[str]:
         """Filter only on the substring after the last comma."""
@@ -31,6 +34,15 @@ class _RecipientCompleter(QCompleter):
         if last_comma == -1:
             return [path.strip()]
         return [path[last_comma + 1:].strip()]
+
+    def pathFromIndex(self, index: QModelIndex) -> str:
+        completion = super().pathFromIndex(index)
+        current = self.state_cache.get("user_text", "")
+        last_comma = current.rfind(",")
+        if last_comma == -1:
+            return completion + ", "
+        else:
+            return current[: last_comma + 1] + " " + completion + ", "
 
 
 def attach_to(line_edit: QLineEdit, items: list[str]) -> _RecipientCompleter:
@@ -41,23 +53,21 @@ def attach_to(line_edit: QLineEdit, items: list[str]) -> _RecipientCompleter:
     completer = _RecipientCompleter(items, line_edit)
     line_edit.setCompleter(completer)
 
-    def _on_activated(text: str):
-        # Replace just the segment after the last comma with the chosen text,
-        # then append ", " so the user can keep typing the next address.
-        current = line_edit.text()
-        last_comma = current.rfind(",")
-        if last_comma == -1:
-            new_text = text + ", "
-        else:
-            new_text = current[: last_comma + 1] + " " + text + ", "
-        # Block signals briefly so this programmatic edit doesn't re-trigger
-        # the completer popup mid-insertion.
-        line_edit.blockSignals(True)
-        line_edit.setText(new_text)
-        line_edit.blockSignals(False)
-        line_edit.setCursorPosition(len(new_text))
+    # Initialize cache with current text (e.g. if pre-filled on reply)
+    completer.state_cache["user_text"] = line_edit.text()
 
-    # `activated[str]` is the safe overload that always fires once per pick.
+    def _on_text_edited(text: str):
+        completer.state_cache["user_text"] = text
+
+    line_edit.textEdited.connect(_on_text_edited)
+
+    def _on_activated(text: str):
+        # text here is the FULL string returned by pathFromIndex
+        completer.state_cache["user_text"] = text
+        # QCompleter's native insertion leaves the cursor at the end, but
+        # we explicitly set it just to be safe.
+        line_edit.setCursorPosition(len(text))
+
     completer.activated[str].connect(_on_activated)
     return completer
 

@@ -270,6 +270,14 @@ class MainWindow(QMainWindow):
         self._total_count = 0
         # Background workers we want to track
         self._register_worker = None
+        # Auto-update setup guard. On a brand-new machine the user is still
+        # configuring their first account when the startup update check
+        # fires. We must NOT download + auto-restart mid-setup (that wipes
+        # the half-entered account and confuses the user). _setup_depth > 0
+        # means an account dialog is open; _deferred_update_manifest holds an
+        # update found during setup so we can install it once setup is done.
+        self._setup_depth = 0
+        self._deferred_update_manifest = None
 
         database.init_db()
         self._build_ui()
@@ -284,6 +292,12 @@ class MainWindow(QMainWindow):
         # user explicitly runs Send/Receive. This gives a chance to review or
         # edit a message before it actually goes out. (No periodic auto-flush.)
         self._outbox_worker = None
+
+        # Send/Receive progress dialog state. Used to stop repeated clicks on
+        # the Send/Receive button from stacking multiple progress dialogs and
+        # launching concurrent sync runs (users tend to mash the button).
+        self._sync_dialog = None
+        self._sync_in_progress = False
 
         # One-time legacy attachment migration (BLOBs → filesystem store).
         # Runs in background so users with multi-GB DBs don't hang on launch.
@@ -504,13 +518,22 @@ class MainWindow(QMainWindow):
             sb.addPermanentWidget(license_label)
 
     def _first_run_prompt(self):
-        ret = QMessageBox.question(
-            self, "Welcome to RunLab Mail",
-            "No email account configured yet.\nWould you like to add one now?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if ret == QMessageBox.Yes:
-            self._add_account()
+        # Hold the auto-updater off while the welcome prompt + first account
+        # setup is on screen (fresh machine). _add_account() guards itself
+        # too, but the welcome box is modal and the startup update timer can
+        # fire while it's open — so guard here as well.
+        self._setup_depth += 1
+        try:
+            ret = QMessageBox.question(
+                self, "Welcome to RunLab Mail",
+                "No email account configured yet.\nWould you like to add one now?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if ret == QMessageBox.Yes:
+                self._add_account()
+        finally:
+            self._setup_depth -= 1
+        self._resume_deferred_update_if_idle()
 
     # ----- Tree (accounts/folders) -----
     def _refresh_accounts_tree(self):
@@ -895,6 +918,13 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Open", lambda: self.viewer.show_email(email_id))
         menu.addSeparator()
+        # Outbox: stuck/failed mail management (resend + remove)
+        if self.current_folder == "outbox":
+            menu.addAction("Resend now ↻", self._flush_outbox_now)
+            menu.addAction("Remove from Outbox 🗑",
+                           lambda: self._delete_outbox_entry(email_id))
+            menu.exec_(self.email_list.viewport().mapToGlobal(pos))
+            return
         menu.addAction("Mark as read", lambda: self._mark_read(email_id, True))
         menu.addAction("Mark as unread", lambda: self._mark_read(email_id, False))
         menu.addSeparator()
@@ -999,22 +1029,41 @@ class MainWindow(QMainWindow):
     # ----- Account actions -----
     def _open_accounts(self):
         """Toolbar 'Accounts' button: list view of all accounts."""
-        dlg = AccountsListDialog(self)
-        dlg.exec_()
+        self._setup_depth += 1
+        try:
+            dlg = AccountsListDialog(self)
+            dlg.exec_()
+        finally:
+            self._setup_depth -= 1
         self._refresh_accounts_tree()
+        self._resume_deferred_update_if_idle()
 
     def _add_account(self):
-        dlg = AccountDialog(self)
-        if dlg.exec_():
+        # Guard the auto-updater: a brand-new machine is configuring its
+        # first account here, and we must not download + restart mid-setup.
+        self._setup_depth += 1
+        try:
+            dlg = AccountDialog(self)
+            accepted = dlg.exec_()
+        finally:
+            self._setup_depth -= 1
+        if accepted:
             self._refresh_accounts_tree()
+        self._resume_deferred_update_if_idle()
 
     def _edit_account(self, account_id):
         acc = database.get_account(account_id)
         if not acc:
             return
-        dlg = AccountDialog(self, account=acc)
-        if dlg.exec_():
+        self._setup_depth += 1
+        try:
+            dlg = AccountDialog(self, account=acc)
+            accepted = dlg.exec_()
+        finally:
+            self._setup_depth -= 1
+        if accepted:
             self._refresh_accounts_tree()
+        self._resume_deferred_update_if_idle()
 
     def _delete_account(self, account_id):
         if QMessageBox.question(
@@ -1047,9 +1096,24 @@ class MainWindow(QMainWindow):
     def _start_sync_with_dialog(self, account_ids: list[int]):
         """Run a Send/Receive cycle for the given accounts with a visible
         progress + log dialog (Outlook-style)."""
+        # Guard against the user mashing Send/Receive: if a sync is already
+        # running, just resurface the existing progress dialog instead of
+        # spawning another one (which would stack dialogs and launch
+        # concurrent fetch runs against the same accounts).
+        if self._sync_in_progress:
+            if self._sync_dialog is not None:
+                self._sync_dialog.show()
+                self._sync_dialog.raise_()
+                self._sync_dialog.activateWindow()
+            else:
+                self.status_label.setText("Send/Receive already in progress...")
+            return
+
         from .sync_progress_dialog import SyncProgressDialog
         dlg = SyncProgressDialog(self)
         self._sync_dialog = dlg
+        self._sync_in_progress = True
+
         # Track account → worker so we can wire up callbacks per task
         self._sync_remaining = 0
         self._sync_workers = []
@@ -1057,6 +1121,8 @@ class MainWindow(QMainWindow):
         accounts = [database.get_account(a) for a in account_ids]
         accounts = [a for a in accounts if a]
         if not accounts:
+            # Nothing to sync — release the guard so the button works again.
+            self._sync_in_progress = False
             return
 
         for acc in accounts:
@@ -1081,11 +1147,14 @@ class MainWindow(QMainWindow):
     def _sync_run_next(self):
         if not getattr(self, "_sync_queue", None):
             self._sync_dialog.all_done()
+            self._sync_in_progress = False  # sync finished — allow a new run
             return
         if self._sync_dialog.is_cancelled:
             self._sync_dialog.all_done()
+            self._sync_in_progress = False  # cancelled — allow a new run
             return
         acc = self._sync_queue.pop(0)
+
         key = f"acc-{acc['id']}"
         self._sync_dialog.start_task(key)
         self._sync_dialog.log(
@@ -1154,7 +1223,13 @@ class MainWindow(QMainWindow):
         )
 
     def _flush_outbox_silent(self):
-        """Background outbox flush. Quietly tries to send queued mail."""
+        """Outbox flush during a Send/Receive cycle.
+
+        Tries to send queued mail. Unlike a true "silent" flush, if any email
+        fails to send we DO surface a bounce log at the end — otherwise the
+        user just sees mail stuck in the Outbox with no explanation (the exact
+        complaint behind this fix). Successful sends still happen quietly.
+        """
         if self._outbox_worker and self._outbox_worker.isRunning():
             return
         # Skip work if outbox is empty across all accounts
@@ -1165,8 +1240,10 @@ class MainWindow(QMainWindow):
                 break
         if not any_pending:
             return
+        self._outbox_errors = []  # collect (outbox_id, error) for bounce log
         self._outbox_worker = OutboxFlushWorker()
         self._outbox_worker.sent_one.connect(self._on_outbox_sent)
+        self._outbox_worker.failed_one.connect(self._on_outbox_failed)
         self._outbox_worker.done.connect(self._on_outbox_flush_done)
         self._outbox_worker.start()
 
@@ -1176,10 +1253,37 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Outbox is already flushing...")
             return
         self.status_label.setText("Flushing outbox...")
+        self._outbox_errors = []  # collect (outbox_id, error) for bounce log
         self._outbox_worker = OutboxFlushWorker()
         self._outbox_worker.sent_one.connect(self._on_outbox_sent)
+        self._outbox_worker.failed_one.connect(self._on_outbox_failed)
         self._outbox_worker.done.connect(self._on_outbox_flush_done_manual)
         self._outbox_worker.start()
+
+    def _on_outbox_failed(self, outbox_id: int, error: str):
+        """Record a per-email send failure so we can show a bounce log."""
+        if not hasattr(self, "_outbox_errors"):
+            self._outbox_errors = []
+        self._outbox_errors.append((outbox_id, error))
+
+    def _delete_outbox_entry(self, email_id: int):
+        """Remove a stuck/failed email from the Outbox (user-confirmed)."""
+        if QMessageBox.question(
+            self, "Remove from Outbox",
+            "Remove this email from the Outbox?\n"
+            "It will NOT be sent and cannot be recovered.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        try:
+            database.delete_outbox(email_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Remove failed", str(e))
+            return
+        self._refresh_email_list()
+        self._update_folder_counts()
+        self._refresh_accounts_tree()
+        self.status_label.setText("Removed from Outbox.")
 
     def _on_outbox_sent(self, account_id: int, outbox_id: int):
         # Refresh whichever folder is currently visible
@@ -1192,8 +1296,20 @@ class MainWindow(QMainWindow):
     def _on_outbox_flush_done(self, sent: int, failed: int):
         if sent > 0:
             self.status_label.setText(f"Outbox: sent {sent} email(s).")
-        # silently ignore failures; will retry next tick
+        if failed:
+            self.status_label.setText(
+                f"Outbox: sent {sent}, failed {failed} (still in Outbox)."
+            )
         self._refresh_accounts_tree()
+        if self.current_folder in ("outbox", "sent"):
+            self._refresh_email_list()
+        # Surface a bounce log so the user knows WHY mail is stuck in the
+        # Outbox after a Send/Receive (previously failures were swallowed
+        # silently, leaving them confused about un-sent mail).
+        errors = getattr(self, "_outbox_errors", [])
+        if errors:
+            self._show_outbox_error_log(errors)
+            self._outbox_errors = []
 
     def _on_outbox_flush_done_manual(self, sent: int, failed: int):
         msg = f"Outbox flush complete. Sent: {sent}"
@@ -1203,6 +1319,53 @@ class MainWindow(QMainWindow):
         self._refresh_accounts_tree()
         if self.current_folder in ("outbox", "sent"):
             self._refresh_email_list()
+        # Show a bounce/error log so the user knows WHY mail didn't go out
+        # and which recipients were refused.
+        errors = getattr(self, "_outbox_errors", [])
+        if errors:
+            self._show_outbox_error_log(errors)
+
+    def _show_outbox_error_log(self, errors: list):
+        """Display a detailed log of failed Outbox sends (bounce log).
+
+        errors: list of (outbox_id, error_message) tuples.
+        """
+        from PyQt5.QtWidgets import (
+            QDialog, QVBoxLayout, QLabel, QTextEdit, QDialogButtonBox
+        )
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Outbox — Send Failures")
+        dlg.resize(640, 420)
+        layout = QVBoxLayout(dlg)
+        header = QLabel(
+            f"<b>{len(errors)} email(s) could not be sent.</b><br>"
+            "They remain in the Outbox. Common causes: wrong recipient "
+            "address, SMTP auth/connection failure, or the server rejecting "
+            "a recipient. Details below:"
+        )
+        header.setWordWrap(True)
+        layout.addWidget(header)
+        log = QTextEdit()
+        log.setReadOnly(True)
+        lines = []
+        for idx, (outbox_id, err) in enumerate(errors, 1):
+            subject = ""
+            try:
+                row = database.get_email(outbox_id)
+                if row:
+                    subject = row.get("subject") or "(no subject)"
+            except Exception:
+                pass
+            lines.append(
+                f"#{idx}  {subject}\n"
+                f"     {err}\n"
+            )
+        log.setPlainText("\n".join(lines))
+        layout.addWidget(log, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.accepted.connect(dlg.accept)
+        layout.addWidget(buttons)
+        dlg.exec_()
 
     # ----- Auto license registration -----
     def _maybe_auto_register_license(self, account_id: int):
@@ -1433,6 +1596,7 @@ class MainWindow(QMainWindow):
             "bcc": d.get("bcc") or "",
             "subject": d.get("subject") or "",
             "body": d.get("body_plain") or "",
+            "body_html": d.get("body_html") or None,
         }
         dlg = ComposeDialog(
             self,
@@ -1622,10 +1786,32 @@ class MainWindow(QMainWindow):
 
     def _on_update_found(self, manifest: dict):
         version = manifest.get("version", "?")
+        # Defer if the user is mid-setup (account dialog open). A brand-new
+        # machine downloads + auto-restarts here otherwise, wiping the
+        # half-entered account and yanking the app out from under the user.
+        # We stash the manifest and resume once the dialog closes.
+        if self._setup_depth > 0:
+            self._deferred_update_manifest = manifest
+            self.update_status_label.setText(
+                f"Update {version} ready — will install after setup"
+            )
+            return
         # Auto-download in background. Status shown in dedicated label that
         # never gets overwritten by fetch progress.
         self.update_status_label.setText(f"⬇ Downloading update {version}...")
         self._auto_install(manifest)
+
+    def _resume_deferred_update_if_idle(self):
+        """Kick off any update that was deferred while an account dialog was
+        open. No-ops if setup is still in progress (nested dialogs) or no
+        update is pending."""
+        if self._setup_depth > 0:
+            return
+        manifest = self._deferred_update_manifest
+        if not manifest:
+            return
+        self._deferred_update_manifest = None
+        self._on_update_found(manifest)
 
     def _auto_install(self, manifest: dict):
         if not updater.is_frozen():
@@ -1947,6 +2133,10 @@ class MainWindow(QMainWindow):
     # ----- Backup / Restore -----
     def _open_backup_menu(self):
         menu = QMenu(self)
+        # Import from other mail apps
+        menu.addAction("Import from Outlook / Live Mail / eM Client...",
+                       self._open_import_dialog)
+        menu.addSeparator()
         # Email DB
         menu.addAction("Export backup file...", self._export_backup)
         menu.addAction("Import backup file...", self._import_backup)
@@ -1962,6 +2152,19 @@ class MainWindow(QMainWindow):
         # Position menu near the button
         from PyQt5.QtGui import QCursor
         menu.exec_(QCursor.pos())
+
+    def _open_import_dialog(self):
+        from .import_dialog import ImportDialog
+        dlg = ImportDialog(self, current_account_id=self.current_account_id)
+        dlg.imported.connect(self._on_import_done)
+        dlg.exec_()
+
+    def _on_import_done(self):
+        # Refresh accounts (a new "Imported Mail" account may have appeared)
+        # and the current email list so imported messages show immediately.
+        self._refresh_accounts_tree()
+        self._refresh_email_list()
+        self._update_folder_counts()
 
     def _export_contacts(self):
         from PyQt5.QtWidgets import QFileDialog

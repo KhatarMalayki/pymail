@@ -615,7 +615,7 @@ class ComposeDialog(QDialog):
         change border). Includes a border by default."""
         from PyQt5.QtWidgets import (
             QDialog, QGridLayout, QLabel, QSpinBox, QPushButton, QHBoxLayout,
-            QCheckBox,
+            QCheckBox, QComboBox,
         )
         dlg = QDialog(self)
         dlg.setWindowTitle("Insert Table")
@@ -629,19 +629,39 @@ class ComposeDialog(QDialog):
         layout.addWidget(QLabel("Border (px):"), 2, 0)
         border_spin = QSpinBox(); border_spin.setRange(0, 10); border_spin.setValue(1)
         layout.addWidget(border_spin, 2, 1)
+        layout.addWidget(QLabel("Table width:"), 3, 0)
+        width_combo = QComboBox()
+        width_combo.setEditable(True)
+        width_combo.addItems(["100%", "90%", "80%", "75%", "70%", "60%", "50%", "40%", "30%", "Auto"])
+        width_combo.setCurrentText("100%")
+        layout.addWidget(width_combo, 3, 1)
         header_chk = QCheckBox("First row is a header")
-        layout.addWidget(header_chk, 3, 0, 1, 2)
+        layout.addWidget(header_chk, 4, 0, 1, 2)
         btns = QHBoxLayout(); btns.addStretch(1)
         ok_btn = QPushButton("Insert"); ok_btn.setDefault(True)
         ok_btn.clicked.connect(dlg.accept); btns.addWidget(ok_btn)
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(dlg.reject); btns.addWidget(cancel_btn)
-        layout.addLayout(btns, 4, 0, 1, 2)
+        layout.addLayout(btns, 5, 0, 1, 2)
         if dlg.exec_() != QDialog.Accepted:
             return
         rows = rows_spin.value()
         cols = cols_spin.value()
         border = float(border_spin.value())
+
+        # Parse table width
+        width_text = width_combo.currentText().strip().lower()
+        if width_text == "auto" or width_text == "":
+            table_width_pct = None  # Auto/variable width
+        else:
+            # Remove % if present and parse
+            width_text = width_text.replace("%", "")
+            try:
+                table_width_pct = float(width_text)
+                if table_width_pct <= 0 or table_width_pct > 100:
+                    table_width_pct = 100.0
+            except ValueError:
+                table_width_pct = 100.0
 
         cursor = self.body_edit.textCursor()
         fmt = QTextTableFormat()
@@ -650,10 +670,16 @@ class ComposeDialog(QDialog):
         fmt.setBorderStyle(QTextFrameFormat.BorderStyle_Solid)
         fmt.setCellPadding(4)
         fmt.setCellSpacing(0)
-        # Even column widths that fill the editor width.
-        fmt.setColumnWidthConstraints(
-            [QTextLength(QTextLength.PercentageLength, 100.0 / cols)] * cols
-        )
+
+        # Calculate column widths based on table width
+        if table_width_pct is not None:
+            # Fixed percentage width for table, even column distribution
+            col_width_pct = table_width_pct / cols
+            fmt.setColumnWidthConstraints(
+                [QTextLength(QTextLength.PercentageLength, col_width_pct)] * cols
+            )
+        # If table_width_pct is None, columns will use variable/available width
+
         table = cursor.insertTable(rows, cols, fmt)
 
         if header_chk.isChecked():
@@ -1117,6 +1143,23 @@ class ComposeDialog(QDialog):
         else:
             self._apply_signature()
 
+    def _sync_completer_caches(self):
+        """Sync each recipient field's completer state_cache to the field's
+        current text.
+
+        The completer caches `user_text` only on the textEdited signal, which
+        is NOT emitted by setText(). Without this sync, after a reply/forward
+        prefill (which uses setText) the cache stays empty — so when the user
+        later picks an autocomplete suggestion, pathFromIndex reads the stale
+        empty cache and WIPES the already-prefilled recipient instead of
+        appending. Calling this after any programmatic setText keeps the
+        completer in step with the field.
+        """
+        for fld in (self.to_edit, self.cc_edit, self.bcc_edit):
+            comp = fld.completer()
+            if comp is not None and hasattr(comp, "state_cache"):
+                comp.state_cache["user_text"] = fld.text()
+
     def _apply_prefill(self, p):
         if "to" in p:
             self.to_edit.setText(p["to"])
@@ -1126,6 +1169,9 @@ class ComposeDialog(QDialog):
             self.bcc_edit.setText(p["bcc"])
         if "subject" in p:
             self.subject_edit.setText(p["subject"])
+        # Keep the autocomplete caches in step with the prefilled recipients
+        # so picking a suggestion appends rather than overwrites.
+        self._sync_completer_caches()
 
         # Body: prefer HTML when provided so quoted reply/forward keeps
         # original formatting, signatures, embedded images, and tables.
@@ -1412,6 +1458,17 @@ class ComposeDialog(QDialog):
         for tok in (self.SIG_MARKER_OPEN, self.SIG_MARKER_CLOSE,
                     "<!--PMSIG_OPEN-->", "<!--PMSIG_CLOSE-->"):
             body_plain = body_plain.replace(tok, "")
+
+        # Collect HTML body if has rich content (tables, formatting, etc.)
+        body_html = None
+        if self._body_has_rich_content():
+            body_html = self.body_edit.toHtml()
+            # Also strip markers from HTML
+            if body_html:
+                for tok in (self.SIG_MARKER_OPEN, self.SIG_MARKER_CLOSE,
+                            "<!--PMSIG_OPEN-->", "<!--PMSIG_CLOSE-->"):
+                    body_html = body_html.replace(tok, "")
+
         return {
             "from": from_addr,
             "to": self.to_edit.text().strip(),
@@ -1419,6 +1476,7 @@ class ComposeDialog(QDialog):
             "bcc": self.bcc_edit.text().strip(),
             "subject": self.subject_edit.text().strip(),
             "body": body_plain,
+            "body_html": body_html,
         }
 
     def save_draft(self) -> bool:

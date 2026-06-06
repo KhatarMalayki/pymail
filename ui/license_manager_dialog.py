@@ -91,6 +91,24 @@ class _SimpleWorker(QThread):
         except Exception as e:
             self.failed.emit(str(e))
 
+
+class _ResultWorker(QThread):
+    """Like _SimpleWorker but carries the function's return value (dict) back
+    to the UI thread — used by generate/re-bind which return a license_key."""
+    done = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, fn):
+        super().__init__()
+        self._fn = fn
+
+    def run(self):
+        try:
+            result = self._fn()
+            self.done.emit(result if isinstance(result, dict) else {})
+        except Exception as e:
+            self.failed.emit(str(e))
+
 # ---------- Main dialog ----------
 
 
@@ -149,6 +167,14 @@ class LicenseManagerDialog(QDialog):
         )
         self.push_ver_btn.clicked.connect(self._push_version)
         btn_row.addWidget(self.push_ver_btn)
+
+        self.generate_btn = QPushButton("➕  Generate license")
+        self.generate_btn.setToolTip(
+            "Create a brand-new signed license key for a user.\n"
+            "Choose floating (any device) or bound to a specific device."
+        )
+        self.generate_btn.clicked.connect(self._generate_license)
+        btn_row.addWidget(self.generate_btn)
 
         btn_row.addStretch(1)
         
@@ -491,6 +517,119 @@ class LicenseManagerDialog(QDialog):
         w.start()
         self._action_worker = w
 
+    # ----- Generate license -----
+    def _generate_license(self):
+        dlg = _GenerateLicenseDialog(self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        params = dlg.values()
+        self.generate_btn.setEnabled(False)
+        self.status_label.setText(f"Generating license for {params['email']}...")
+
+        def _do():
+            return license_client.admin_generate(
+                self._token,
+                params["email"],
+                params["name"],
+                days=params["days"],
+                machine_id=params["machine_id"],
+                note=params["note"],
+            )
+
+        w = _ResultWorker(_do)
+        w.done.connect(self._on_generate_done)
+        w.failed.connect(self._on_generate_failed)
+        w.start()
+        self._gen_worker = w
+
+    def _on_generate_done(self, resp: dict):
+        self.generate_btn.setEnabled(True)
+        key = resp.get("license_key") or ""
+        floating = resp.get("floating")
+        if not key:
+            self.status_label.setText("Generate failed: no key returned.")
+            QMessageBox.critical(self, "Generate failed",
+                                 "The Worker did not return a license key.")
+            return
+        self.status_label.setText(
+            f"✓ License {resp.get('license_id')} generated."
+        )
+        bind_note = ("floating (any device)" if floating
+                     else "bound to the specified device")
+        _LicenseKeyDialog(
+            self, key,
+            title="License generated",
+            intro=(f"New license created ({bind_note}).\n"
+                   "Send this key to the user — they paste it via "
+                   "\"Enter / replace license key\" in RunLab Mail."),
+        ).exec_()
+        self._load()
+
+    def _on_generate_failed(self, err: str):
+        self.generate_btn.setEnabled(True)
+        self.status_label.setText(f"Generate failed: {err}")
+        QMessageBox.critical(self, "Generate failed", err)
+
+    # ----- Change device / re-bind -----
+    def _rebind_device(self, license_id: str, name: str):
+        mid, ok = QInputDialog.getText(
+            self, "Change device — re-bind license",
+            "Paste the NEW device's Machine ID for "
+            f"{name} ({license_id}).\n\n"
+            "The user can find it in RunLab Mail → License dialog, "
+            "or you can leave it blank to make the license FLOATING "
+            "(usable on any device).",
+            QLineEdit.Normal,
+            "",
+        )
+        if not ok:
+            return
+        mid = mid.strip()
+        floating = (mid == "")
+        confirm = (
+            f"Make {license_id} ({name}) FLOATING (usable on any device)?"
+            if floating else
+            f"Re-bind {license_id} ({name}) to device:\n  {mid}\n\n"
+            "The old device's key will stop working."
+        )
+        if QMessageBox.question(
+            self, "Confirm change device", confirm,
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Yes,
+        ) != QMessageBox.Yes:
+            return
+        self.status_label.setText(f"Re-binding {license_id}...")
+
+        def _do():
+            return license_client.admin_rebind(self._token, license_id, mid)
+
+        w = _ResultWorker(_do)
+        w.done.connect(lambda resp: self._on_rebind_done(resp, name))
+        w.failed.connect(self._on_action_failed)
+        w.start()
+        self._rebind_worker = w
+
+    def _on_rebind_done(self, resp: dict, name: str):
+        key = resp.get("license_key") or ""
+        if not key:
+            self.status_label.setText("Re-bind failed: no key returned.")
+            QMessageBox.critical(self, "Re-bind failed",
+                                 "The Worker did not return a license key.")
+            return
+        floating = not (resp.get("machine_id") or "").strip()
+        self.status_label.setText(
+            f"✓ {resp.get('license_id')} re-bound. Send the new key to {name}."
+        )
+        bind_note = ("floating (any device)" if floating
+                     else "bound to the new device")
+        _LicenseKeyDialog(
+            self, key,
+            title="Device changed — new license key",
+            intro=(f"License re-issued ({bind_note}).\n"
+                   f"Send this key to {name} — they paste it via "
+                   "\"Enter / replace license key\" on the NEW device."),
+        ).exec_()
+        self._load()
+
     def _on_load_failed(self, err: str):
         self.status_label.setText(f"Failed: {err}")
         self.refresh_btn.setEnabled(True)
@@ -659,6 +798,10 @@ class LicenseManagerDialog(QDialog):
             )
         menu.addSeparator()
         menu.addAction(
+            "🔄  Change device (re-bind to new machine)...",
+            lambda: self._rebind_device(license_id, name),
+        )
+        menu.addAction(
             "🚀  Push specific version to this user...",
             lambda: self._push_version_single(license_id, name),
         )
@@ -805,3 +948,155 @@ def _version_key(v: str) -> tuple:
             return (-1,)
     return tuple(parts) if parts else (-1,)
 
+
+
+# ---------- Generate / re-bind helper dialogs ----------
+
+
+class _GenerateLicenseDialog(QDialog):
+    """Collects the fields needed to generate a new license."""
+
+    DURATIONS = [
+        ("Perpetual (never expires)", 0),
+        ("30 days", 30),
+        ("90 days", 90),
+        ("1 year", 365),
+        ("2 years", 730),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Generate license")
+        self.resize(460, 300)
+        self._build_ui()
+
+    def _build_ui(self):
+        from PyQt5.QtWidgets import QFormLayout, QCheckBox
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        form = QFormLayout()
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Display name (e.g. Budi Santoso)")
+        form.addRow("Name:", self.name_edit)
+
+        self.email_edit = QLineEdit()
+        self.email_edit.setPlaceholderText("user@example.com")
+        form.addRow("Email:", self.email_edit)
+
+        self.duration_combo = QComboBox()
+        for label, _days in self.DURATIONS:
+            self.duration_combo.addItem(label)
+        form.addRow("Validity:", self.duration_combo)
+
+        self.floating_cb = QCheckBox(
+            "Floating license (usable on any device)"
+        )
+        self.floating_cb.setChecked(True)
+        self.floating_cb.toggled.connect(self._on_floating_toggled)
+        form.addRow("", self.floating_cb)
+
+        self.machine_edit = QLineEdit()
+        self.machine_edit.setPlaceholderText(
+            "Machine ID of the target device (leave blank if floating)"
+        )
+        self.machine_edit.setEnabled(False)
+        form.addRow("Machine ID:", self.machine_edit)
+
+        self.note_edit = QLineEdit()
+        self.note_edit.setPlaceholderText("Optional note")
+        form.addRow("Note:", self.note_edit)
+
+        layout.addLayout(form)
+        layout.addStretch(1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("Generate")
+        ok.setDefault(True)
+        ok.clicked.connect(self._validate_accept)
+        btn_row.addWidget(cancel)
+        btn_row.addWidget(ok)
+        layout.addLayout(btn_row)
+
+    def _on_floating_toggled(self, floating: bool):
+        # When floating, no machine binding is needed.
+        self.machine_edit.setEnabled(not floating)
+        if floating:
+            self.machine_edit.clear()
+
+    def _validate_accept(self):
+        email = self.email_edit.text().strip()
+        if "@" not in email:
+            QMessageBox.warning(self, "Invalid email",
+                                "Please enter a valid email address.")
+            return
+        if not self.floating_cb.isChecked() and not self.machine_edit.text().strip():
+            QMessageBox.warning(
+                self, "Machine ID required",
+                "Either tick 'Floating license' or paste the target "
+                "device's Machine ID.",
+            )
+            return
+        self.accept()
+
+    def values(self) -> dict:
+        days = self.DURATIONS[self.duration_combo.currentIndex()][1]
+        machine_id = ("" if self.floating_cb.isChecked()
+                      else self.machine_edit.text().strip())
+        return {
+            "name": self.name_edit.text().strip(),
+            "email": self.email_edit.text().strip().lower(),
+            "days": days,
+            "machine_id": machine_id,
+            "note": self.note_edit.text().strip(),
+        }
+
+
+class _LicenseKeyDialog(QDialog):
+    """Shows a generated/re-issued license key with a copy button."""
+
+    def __init__(self, parent, license_key: str, *,
+                 title: str = "License key", intro: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(560, 360)
+        self._key = license_key
+        self._build_ui(intro)
+
+    def _build_ui(self, intro: str):
+        from PyQt5.QtWidgets import QPlainTextEdit
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        if intro:
+            lbl = QLabel(intro)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet("color:#605e5c;")
+            layout.addWidget(lbl)
+
+        self.key_view = QPlainTextEdit()
+        self.key_view.setReadOnly(True)
+        self.key_view.setPlainText(self._key)
+        self.key_view.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 9pt;"
+        )
+        layout.addWidget(self.key_view, 1)
+
+        btn_row = QHBoxLayout()
+        copy_btn = QPushButton("📋  Copy license key")
+        copy_btn.clicked.connect(self._copy)
+        btn_row.addWidget(copy_btn)
+        btn_row.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        btn_row.addWidget(close)
+        layout.addLayout(btn_row)
+
+    def _copy(self):
+        from PyQt5.QtWidgets import QApplication
+        QApplication.clipboard().setText(self._key)

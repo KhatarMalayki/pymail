@@ -122,21 +122,29 @@ async function checkAdmin(request, env) {
   return token === env.ADMIN_TOKEN;
 }
 
-// True if this user record belongs to the admin/developer. Mirrors the
-// client-side _is_admin() check: email in ADMIN_EMAILS, or a license note
-// flagged admin/owner/developer. Admins must always track the latest
-// manifest version, so they are excluded from "push version to all users".
+// True if this user record belongs to the admin/developer. Admins must always
+// track the latest manifest version, so they are excluded from "push version
+// to all users".
+//
+// Identification is by the trusted email allow-list ONLY. We deliberately do
+// NOT inspect user.note here: the Worker writes the word "admin" into ordinary
+// users' notes itself ("issued by admin", "extended by admin to ...",
+// "re-bound to new device by admin ..."), so a note substring match would
+// wrongly classify normal users as admins and skip them in push-version,
+// leaving their allowed_version stuck at "(all)".
 function isAdminUser(user, env) {
   if (!user) return false;
-  const adminEmails = String(env.ADMIN_EMAILS || "")
+  // Fall back to the same emails the client hardcodes in _is_admin() so this
+  // works even if the ADMIN_EMAILS secret isn't set.
+  const configured = String(env.ADMIN_EMAILS || "")
     .split(",")
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
+  const adminEmails = configured.length
+    ? configured
+    : ["khatar@intra.tunasgroup.com", "khatarmalayki21@gmail.com"];
   const email = String(user.email || "").trim().toLowerCase();
-  if (email && adminEmails.includes(email)) return true;
-  const note = String(user.note || "").toLowerCase();
-  return note.includes("admin") || note.includes("owner") ||
-         note.includes("developer");
+  return !!email && adminEmails.includes(email);
 }
 
 // ---------- Storage helpers (R2) ----------

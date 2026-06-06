@@ -218,3 +218,44 @@ def admin_push_version_single(token: str, license_id: str, version: str) -> dict
         {"license_id": license_id, "allowed_version": version},
         headers=admin_headers(token),
     )
+
+
+def admin_rebind(token: str, license_id: str, machine_id: str, *,
+                 hostname: str = "", os_user: str = "") -> dict:
+    """Move an existing license to a new device (new machine_id_hash).
+
+    The Worker re-signs the license bound to the new machine and returns a
+    fresh license_key the user pastes via 'Enter / replace license key'.
+    license_id, expiry, and revocation history are preserved.
+    """
+    return _post(
+        "/admin/rebind",
+        {
+            "license_id": license_id,
+            "machine_id": machine_id,
+            "hostname": hostname,
+            "os_user": os_user,
+        },
+        headers=admin_headers(token),
+    )
+
+
+def admin_generate(token: str, email: str, name: str = "", *,
+                   days: int = 0, machine_id: str = "",
+                   note: str = "") -> dict:
+    """Generate a brand-new signed license and add it to the registry.
+
+    days=0 means perpetual. machine_id="" issues a floating license (usable
+    on any device). Returns {license_id, license_key, expires_at, floating}.
+    """
+    return _post(
+        "/admin/generate",
+        {
+            "email": email,
+            "name": name,
+            "days": days,
+            "machine_id": machine_id,
+            "note": note,
+        },
+        headers=admin_headers(token),
+    )

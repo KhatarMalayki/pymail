@@ -7,7 +7,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QLineEdit,
     QPushButton, QFileDialog, QMessageBox, QGroupBox, QRadioButton,
-    QButtonGroup, QWidget,
+    QButtonGroup, QWidget, QCheckBox,
 )
 from core import config
 
@@ -89,6 +89,24 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(gb)
 
+        # ---- Privacy ----
+        gb_priv = QGroupBox("Privacy")
+        priv_layout = QVBoxLayout(gb_priv)
+        self.block_images_cb = QCheckBox(
+            "Block remote images in emails (recommended)"
+        )
+        priv_layout.addWidget(self.block_images_cb)
+        priv_info = QLabel(
+            "Many emails load images (logos, tracking pixels) from the "
+            "internet when opened. Blocking them protects your privacy and "
+            "speeds up opening messages. You can still load images per "
+            "message with the \"Show images\" button."
+        )
+        priv_info.setWordWrap(True)
+        priv_info.setStyleSheet("color:#605e5c;")
+        priv_layout.addWidget(priv_info)
+        layout.addWidget(gb_priv)
+
         layout.addStretch(1)
 
         # ---- Buttons ----
@@ -107,6 +125,15 @@ class SettingsDialog(QDialog):
         current = str(config.get_data_dir())
         self.path_edit.setText(current)
         self.target_edit.setText(current)
+        self.block_images_cb.setChecked(
+            bool(config.get("block_remote_images", False))
+        )
+        # Persist the privacy toggle immediately so it takes effect without
+        # requiring the "Apply && Restart" flow (that flow is only for the
+        # data-folder change, which quits the app).
+        self.block_images_cb.toggled.connect(
+            lambda v: config.set_value("block_remote_images", bool(v))
+        )
 
     def _browse(self):
         current = self.target_edit.text() or str(config.get_data_dir())

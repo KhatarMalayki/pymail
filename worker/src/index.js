@@ -87,6 +87,12 @@ export default {
         if (path === "/admin/update-user" && request.method === "POST") {
           return cors(await handleAdminUpdateUser(request, env));
         }
+        if (path === "/admin/rebind" && request.method === "POST") {
+          return cors(await handleAdminRebind(request, env));
+        }
+        if (path === "/admin/generate" && request.method === "POST") {
+          return cors(await handleAdminGenerate(request, env));
+        }
       }
       return cors(json({ error: "Not found", path }, 404));
     } catch (e) {
@@ -114,6 +120,23 @@ async function checkAdmin(request, env) {
   const token = request.headers.get("X-Admin-Token") || "";
   if (!env.ADMIN_TOKEN) return false;
   return token === env.ADMIN_TOKEN;
+}
+
+// True if this user record belongs to the admin/developer. Mirrors the
+// client-side _is_admin() check: email in ADMIN_EMAILS, or a license note
+// flagged admin/owner/developer. Admins must always track the latest
+// manifest version, so they are excluded from "push version to all users".
+function isAdminUser(user, env) {
+  if (!user) return false;
+  const adminEmails = String(env.ADMIN_EMAILS || "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  const email = String(user.email || "").trim().toLowerCase();
+  if (email && adminEmails.includes(email)) return true;
+  const note = String(user.note || "").toLowerCase();
+  return note.includes("admin") || note.includes("owner") ||
+         note.includes("developer");
 }
 
 // ---------- Storage helpers (R2) ----------
@@ -320,7 +343,10 @@ async function handleVerify(request, env) {
     valid: true,
     status: "active",
     expires_at: user.expires_at,
-    allowed_version: user.allowed_version || null,
+    // Admins always track the latest manifest version, so never hand them
+    // an allowed_version pin — this lets a previously-pinned admin install
+    // recover and auto-update on the next verify poll, no re-push needed.
+    allowed_version: isAdminUser(user, env) ? null : (user.allowed_version || null),
   });
 }
 
@@ -471,6 +497,111 @@ async function handleAdminUpdateUser(request, env) {
   });
 }
 
+async function handleAdminRebind(request, env) {
+  // Move an existing license to a new device. The admin supplies the new
+  // machine_id_hash (computed on the target device). We re-sign the license
+  // payload bound to the new machine and return a fresh license_key the user
+  // pastes via "Enter / replace license key". The license_id is preserved so
+  // the registry row, expiry, and revocation history stay intact.
+  const body = await request.json().catch(() => ({}));
+  const licenseId = String(body.license_id || "").trim();
+  const newMachineId = String(body.machine_id || "").trim();
+  if (!licenseId) return json({ error: "license_id required" }, 400);
+  if (!newMachineId) return json({ error: "machine_id required" }, 400);
+
+  const data = await loadUsers(env);
+  const user = data.users.find((u) => u.license_id === licenseId);
+  if (!user) return json({ error: "not found" }, 404);
+
+  const oldMachineId = user.machine_id || "";
+  user.machine_id = newMachineId;
+  if (body.hostname !== undefined) user.hostname = String(body.hostname).trim();
+  if (body.os_user !== undefined) user.os_user = String(body.os_user).trim();
+  user.last_seen = new Date().toISOString();
+  user.note = `re-bound to new device by admin (was ${oldMachineId || "unbound"})`;
+  await saveUsers(env, data);
+
+  // Re-sign the license bound to the NEW machine so validate_license() passes
+  // on the target device.
+  const payload = {
+    license_id: user.license_id,
+    name: user.name || "",
+    email: user.email,
+    issued_at: user.issued_at,
+    expires_at: user.expires_at || "",
+    machine_id_hash: newMachineId,
+    note: user.note || "",
+  };
+  const signature = await signPayload(payload, env);
+  return json({
+    ok: true,
+    license_id: user.license_id,
+    license_key: makeLicenseKey(payload, signature),
+    machine_id: newMachineId,
+    old_machine_id: oldMachineId,
+  });
+}
+
+async function handleAdminGenerate(request, env) {
+  // Create a brand-new license from scratch and add it to the registry.
+  // Body: {name, email, days (0 = perpetual), machine_id ("" = floating),
+  //        note}. Returns the signed license_key for the user to paste.
+  const body = await request.json().catch(() => ({}));
+  const email = String(body.email || "").trim().toLowerCase();
+  const name = String(body.name || "").trim();
+  if (!email || !email.includes("@")) {
+    return json({ error: "valid email required" }, 400);
+  }
+
+  const machineId = String(body.machine_id || "").trim(); // "" = floating
+  const days = parseInt(body.days, 10);
+  const now = new Date();
+  let expiresAt = "";
+  if (Number.isFinite(days) && days > 0) {
+    expiresAt = new Date(now.getTime() + days * 86400000).toISOString();
+  } // days == 0 or missing → perpetual (empty expiry)
+
+  const licenseId = newLicenseId();
+  const issuedAt = now.toISOString();
+  const note = String(body.note || "").trim() || "issued by admin";
+
+  const data = await loadUsers(env);
+  data.users.push({
+    license_id: licenseId,
+    machine_id: machineId,
+    email,
+    name,
+    hostname: String(body.hostname || "").trim(),
+    os_user: String(body.os_user || "").trim(),
+    version: "",
+    issued_at: issuedAt,
+    expires_at: expiresAt,
+    first_seen: issuedAt,
+    last_seen: issuedAt,
+    status: "active",
+    note,
+  });
+  await saveUsers(env, data);
+
+  const payload = {
+    license_id: licenseId,
+    name,
+    email,
+    issued_at: issuedAt,
+    expires_at: expiresAt,
+    machine_id_hash: machineId, // "" = floating (any machine)
+    note,
+  };
+  const signature = await signPayload(payload, env);
+  return json({
+    ok: true,
+    license_id: licenseId,
+    license_key: makeLicenseKey(payload, signature),
+    expires_at: expiresAt,
+    floating: machineId === "",
+  });
+}
+
 async function handleAdminPushVersion(request, env) {
   const body = await request.json().catch(() => ({}));
   const version = String(body.version || "").trim();
@@ -478,12 +609,21 @@ async function handleAdminPushVersion(request, env) {
 
   const data = await loadUsers(env);
   let updated = 0;
+  let skippedAdmins = 0;
   for (const user of data.users) {
+    if (isAdminUser(user, env)) {
+      // Never pin the admin/developer — they always track the latest
+      // manifest version. Clear any stale pin so a previously-pinned
+      // admin install recovers and can auto-update again.
+      if (user.allowed_version) user.allowed_version = null;
+      skippedAdmins++;
+      continue;
+    }
     user.allowed_version = version;
     updated++;
   }
   await saveUsers(env, data);
-  return json({ ok: true, version, updated });
+  return json({ ok: true, version, updated, skipped_admins: skippedAdmins });
 }
 
 async function handleAdminDelete(request, env) {

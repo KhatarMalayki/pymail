@@ -43,9 +43,16 @@ def _dpapi_encrypt(plaintext: bytes) -> bytes | None:
             ]
 
         crypt32 = ctypes.windll.crypt32
+        # IMPORTANT: keep a Python reference to the input buffer for the
+        # whole duration of the Win32 call. If we inline
+        # create_string_buffer(...) directly inside cast(...), nothing holds
+        # the buffer alive and the garbage collector may free it before (or
+        # during) CryptProtectData runs. That makes the call read freed /
+        # reused memory and intermittently fail — which is exactly why some
+        # accounts lost their saved POP3 password right after saving.
+        in_buf = ctypes.create_string_buffer(plaintext, len(plaintext))
         in_blob = DATA_BLOB(len(plaintext),
-                            ctypes.cast(ctypes.create_string_buffer(plaintext),
-                                        ctypes.POINTER(ctypes.c_char)))
+                            ctypes.cast(in_buf, ctypes.POINTER(ctypes.c_char)))
         out_blob = DATA_BLOB()
         if not crypt32.CryptProtectData(
             ctypes.byref(in_blob), None, None, None, None, 0,
@@ -77,9 +84,12 @@ def _dpapi_decrypt(ciphertext: bytes) -> bytes | None:
             ]
 
         crypt32 = ctypes.windll.crypt32
+        # Keep a live reference to the input buffer (see _dpapi_encrypt for
+        # why). create_string_buffer with an explicit length copies the full
+        # ciphertext verbatim, including any embedded NUL bytes.
+        in_buf = ctypes.create_string_buffer(ciphertext, len(ciphertext))
         in_blob = DATA_BLOB(len(ciphertext),
-                            ctypes.cast(ctypes.create_string_buffer(ciphertext),
-                                        ctypes.POINTER(ctypes.c_char)))
+                            ctypes.cast(in_buf, ctypes.POINTER(ctypes.c_char)))
         out_blob = DATA_BLOB()
         if not crypt32.CryptUnprotectData(
             ctypes.byref(in_blob), None, None, None, None, 0,

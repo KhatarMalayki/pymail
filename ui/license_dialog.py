@@ -126,6 +126,7 @@ class LicenseInfoDialog(QDialog):
             ("Issued", payload.get("issued_at") or "-"),
             ("Expires", payload.get("expires_at") or "(never)"),
             ("Machine bound", "yes" if payload.get("machine_id_hash") else "no"),
+            ("Machine ID", licmod.get_machine_id()),
         ]
         for k, v in rows:
             row = QHBoxLayout()
@@ -137,6 +138,16 @@ class LicenseInfoDialog(QDialog):
             lv.setWordWrap(True)
             row.addWidget(lk)
             row.addWidget(lv, 1)
+            if k == "Machine ID":
+                copy_mid = QPushButton("Copy")
+                copy_mid.setToolTip(
+                    "Send this to your admin to move your license to this device."
+                )
+                copy_mid.clicked.connect(
+                    lambda _=False, val=str(v):
+                        QApplication.clipboard().setText(val)
+                )
+                row.addWidget(copy_mid)
             layout.addLayout(row)
 
         layout.addStretch(1)

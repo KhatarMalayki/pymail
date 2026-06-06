@@ -241,6 +241,13 @@ def main():
             "--noconfirm", "--clean", "--onedir",
             "--windowed",
             "--name", APP_NAME,
+            # Ensure the mail-import backends are bundled. win32com/pythoncom
+            # drive Outlook for .pst import; mailbox handles .mbox files.
+            "--hidden-import", "win32com",
+            "--hidden-import", "win32com.client",
+            "--hidden-import", "pythoncom",
+            "--hidden-import", "pywintypes",
+            "--hidden-import", "mailbox",
             "main.py",
         ]
         icon = ROOT / "resources" / "pymail.ico"

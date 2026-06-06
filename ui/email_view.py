@@ -6,9 +6,9 @@ import tempfile
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextBrowser, QFrame,
     QPushButton, QListWidget, QListWidgetItem, QFileDialog, QMessageBox,
-    QMenu,
+    QMenu, QScrollArea, QSizePolicy,
 )
-from PyQt5.QtCore import Qt, QUrl, pyqtSignal, QSize, QRect
+from PyQt5.QtCore import Qt, QUrl, pyqtSignal, QSize, QRect, QTimer, QThread
 from PyQt5.QtGui import (
     QDesktopServices, QFont, QPainter, QColor, QPixmap, QBrush, QPen,
 )
@@ -35,6 +35,207 @@ def _make_avatar_pixmap(text: str, size: int = 40) -> QPixmap:
     return pm
 
 
+class _ImageFetchWorker(QThread):
+    """Downloads remote images for an email body off the UI thread.
+
+    Emits `fetched(url, QPixmap)` for each image that loads successfully so
+    the viewer can drop it into the document and re-render. Running this in a
+    background thread keeps the window responsive — the synchronous
+    urllib download used to block the GUI thread and trigger Windows'
+    "Not Responding" state whenever a message contained remote signature
+    logos (or pointed at a slow/unreachable host).
+    """
+    fetched = pyqtSignal(str, QPixmap)
+
+    def __init__(self, urls: list[str], parent=None):
+        super().__init__(parent)
+        self._urls = list(urls)
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        import urllib.request
+        for url_str in self._urls:
+            if self._cancelled:
+                return
+            try:
+                req = urllib.request.Request(
+                    url_str, headers={"User-Agent": "RunLabMail/1.0"}
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    data = resp.read(512 * 1024)  # cap at 512 KB
+            except Exception:
+                continue
+            if self._cancelled:
+                return
+            pm = QPixmap()
+            pm.loadFromData(data)
+            if not pm.isNull():
+                self.fetched.emit(url_str, pm)
+
+
+class NetworkAwareTextBrowser(QTextBrowser):
+    """QTextBrowser that renders external images (http/https) for sender
+    signatures with logos.
+
+    Downloads happen on a background thread so the UI never blocks. On first
+    render `loadResource` returns whatever is already cached (or an empty
+    pixmap), then a worker fetches the missing images and the body re-renders
+    once they arrive. Downloads are cached per-session so repeated views
+    don't re-fetch.
+
+    Remote images can also be blocked entirely (Outlook-style privacy
+    default). When blocking is on, remote URLs are neither fetched nor
+    rendered; instead `images_blocked` is emitted so the viewer can offer a
+    "Show images" button."""
+
+    images_blocked = pyqtSignal(int)  # number of remote images blocked
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._image_cache: dict[str, QPixmap] = {}
+        self._pending: set[str] = set()
+        self._worker: _ImageFetchWorker | None = None
+        self._current_html: str = ""
+        self._block_images: bool = False
+        self._blocked_count: int = 0
+        # The browser does NOT scroll on its own: it grows to fit its content
+        # and the outer scroll area (see EmailView) scrolls header + body as
+        # one unit, like Outlook's reading pane.
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.document().documentLayout().documentSizeChanged.connect(
+            self._adjust_height
+        )
+
+    def _adjust_height(self, *args) -> None:
+        """Resize the widget to fit the full document so the outer scroll
+        area can scroll everything together."""
+        doc = self.document()
+        doc.setTextWidth(self.viewport().width())
+        h = int(doc.size().height())
+        # Account for the content margins/frame so the last line isn't clipped.
+        self.setFixedHeight(h + 12)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Re-wrap to the new width, then recompute height.
+        self._adjust_height()
+
+    def set_block_images(self, block: bool) -> None:
+        """Set whether remote images are blocked for the NEXT render."""
+        self._block_images = bool(block)
+
+    def reload_with_images(self) -> None:
+        """Re-render the current message WITH remote images (the user clicked
+        'Show images')."""
+        self._block_images = False
+        self.setHtml(self._current_html)
+
+    @staticmethod
+    def _scan_remote_images(html: str) -> set:
+        """Return the set of http/https image URLs referenced in the HTML.
+
+        Done with a regex up front (instead of relying on Qt calling
+        loadResource at a predictable time) so blocking and background
+        fetching are deterministic."""
+        import re
+        urls = set()
+        for m in re.finditer(
+            r'<img\b[^>]*?\bsrc\s*=\s*["\']([^"\']+)["\']', html or "",
+            flags=re.IGNORECASE,
+        ):
+            u = m.group(1).strip()
+            if u.startswith(("http://", "https://")):
+                urls.add(u)
+        return urls
+
+    def setHtml(self, html: str) -> None:  # type: ignore[override]
+        # Stop any in-flight fetch from a previously viewed email.
+        self._stop_worker()
+        self._current_html = html or ""
+        self._pending.clear()
+        self._blocked_count = 0
+
+        remote = self._scan_remote_images(self._current_html)
+
+        if self._block_images and remote:
+            # Render without fetching; loadResource returns empty for remotes.
+            super().setHtml(self._current_html)
+            self._blocked_count = len(remote)
+            self.images_blocked.emit(self._blocked_count)
+            return
+
+        super().setHtml(self._current_html)
+        # Fetch any remote images not already cached, on a background thread.
+        to_fetch = [u for u in remote if u not in self._image_cache]
+        if to_fetch:
+            self._pending = set(to_fetch)
+            self._start_worker(to_fetch)
+
+    def loadResource(self, rtype: int, url: QUrl) -> object:
+        from PyQt5.QtGui import QTextDocument
+        if rtype == QTextDocument.ImageResource:
+            url_str = url.toString()
+            if url_str.startswith(("http://", "https://")):
+                # Serve from cache when available (used by the re-render after
+                # a background fetch); otherwise return an empty pixmap so
+                # rendering never blocks on the network.
+                if not self._block_images and url_str in self._image_cache:
+                    return self._image_cache[url_str]
+                return QPixmap()
+        return super().loadResource(rtype, url)
+
+    def _start_worker(self, urls: list[str]) -> None:
+        self._worker = _ImageFetchWorker(urls, self)
+        self._worker.fetched.connect(self._on_image_fetched)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.start()
+
+    def _stop_worker(self) -> None:
+        if self._worker is not None:
+            w = self._worker
+            w.cancel()
+            try:
+                w.fetched.disconnect(self._on_image_fetched)
+                w.finished.disconnect(self._on_worker_finished)
+            except (TypeError, RuntimeError):
+                pass
+            # Let the cancelled thread delete itself once it unwinds (it
+            # checks the cancel flag between downloads) so workers don't pile
+            # up when the user clicks through messages quickly.
+            w.finished.connect(w.deleteLater)
+            self._worker = None
+
+    def _on_image_fetched(self, url_str: str, pm: QPixmap) -> None:
+        from PyQt5.QtGui import QTextDocument
+        # Cache the image and register it with the document.
+        self._image_cache[url_str] = pm
+        self._pending.discard(url_str)
+        self.document().addResource(
+            QTextDocument.ImageResource, QUrl(url_str), pm,
+        )
+
+    def _on_worker_finished(self) -> None:
+        # Re-render once downloads are done so the layout picks up the real
+        # image sizes. loadResource now serves images straight from cache, so
+        # this render is synchronous and non-blocking. Images that failed to
+        # download are simply skipped. Preserve scroll position so the view
+        # doesn't jump.
+        if self.sender() is not self._worker:
+            return
+        self._worker = None
+        if not self._image_cache:
+            return
+        vbar = self.verticalScrollBar()
+        pos = vbar.value()
+        super().setHtml(self._current_html)
+        vbar.setValue(pos)
+
+
 class EmailView(QWidget):
     reply_requested = pyqtSignal(dict, str)  # email, mode (reply, reply_all, forward)
 
@@ -49,7 +250,7 @@ class EmailView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Header panel
+        # Header panel wrapped in scroll area for scrolling like compose
         self.header_frame = QFrame()
         self.header_frame.setStyleSheet(
             f"QFrame {{ background: {theme_color('bg')}; "
@@ -130,9 +331,7 @@ class EmailView(QWidget):
         self.forward_btn.clicked.connect(lambda: self.reply_requested.emit(self.email, "forward"))
         h_layout.addLayout(btn_row)
 
-        layout.addWidget(self.header_frame)
-
-        # Attachments
+        # Attachments (below header, outside scroll)
         self.att_frame = QFrame()
         self.att_frame.setStyleSheet(
             "QFrame { background:#fff8e1; border-bottom: 1px solid #e0d090; }"
@@ -143,31 +342,85 @@ class EmailView(QWidget):
         att_label.setStyleSheet("color:#604000;")
         a_layout.addWidget(att_label)
         self.att_list = QListWidget()
-        self.att_list.setMaximumHeight(80)
+        self.att_list.setMaximumHeight(120)
         self.att_list.itemDoubleClicked.connect(self._open_attachment)
         self.att_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.att_list.customContextMenuRequested.connect(self._att_context_menu)
         a_layout.addWidget(self.att_list)
-        layout.addWidget(self.att_frame)
         self.att_frame.setVisible(False)
 
-        # Body viewer. The message itself is rendered on a WHITE "page" even
-        # in dark mode — sender HTML usually assumes a light background (dark
-        # text on white), so forcing a dark bg here would make many emails
-        # unreadable. This mirrors Outlook / eM Client behavior.
-        self.body_view = QTextBrowser()
+        # "Remote images blocked" banner (Outlook-style). Hidden unless the
+        # current message has remote images that we chose not to load.
+        self.img_banner = QFrame()
+        self.img_banner.setStyleSheet(
+            "QFrame { background:#fff4ce; border-bottom:1px solid #e6d27a; }"
+        )
+        ib_layout = QHBoxLayout(self.img_banner)
+        ib_layout.setContentsMargins(16, 8, 16, 8)
+        ib_layout.setSpacing(10)
+        self.img_banner_label = QLabel("Remote images in this message were not downloaded.")
+        self.img_banner_label.setStyleSheet("color:#5c4a00; background:transparent;")
+        self.img_banner_label.setWordWrap(True)
+        ib_layout.addWidget(self.img_banner_label, 1)
+        self.show_images_btn = QPushButton("Show images")
+        self.show_images_btn.setCursor(Qt.PointingHandCursor)
+        self.show_images_btn.clicked.connect(self._show_remote_images)
+        ib_layout.addWidget(self.show_images_btn, 0)
+        self.img_banner.setVisible(False)
+
+        # Body viewer — grows to fit content; the outer scroll area below
+        # scrolls header + attachments + body together as one unit (Outlook
+        # reading-pane style), instead of two separate scroll regions.
+        self.body_view = NetworkAwareTextBrowser()
         self.body_view.setOpenExternalLinks(True)
+        self.body_view.images_blocked.connect(self._on_images_blocked)
         self.body_view.setStyleSheet(
             "QTextBrowser { background:#ffffff; color:#201f1e; "
             "border:none; padding:16px 20px; }"
         )
-        layout.addWidget(self.body_view, 1)
+
+        # Single content container: everything scrolls together.
+        content = QWidget()
+        content.setStyleSheet(f"background:{theme_color('bg')};")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        content_layout.addWidget(self.header_frame)
+        content_layout.addWidget(self.att_frame)
+        content_layout.addWidget(self.img_banner)
+        content_layout.addWidget(self.body_view)
+        content_layout.addStretch(0)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet(
+            f"QScrollArea {{ border: none; background: {theme_color('bg')}; }}"
+        )
+        self.scroll.setWidget(content)
+        layout.addWidget(self.scroll, 1)
+
+        # The body grows to fit its content and has no scrollbar of its own,
+        # so wheel events over it must drive the outer scroll area. Intercept
+        # them here and relay to the unified pane's vertical scrollbar.
+        self.body_view.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        from PyQt5.QtCore import QEvent
+        if obj is self.body_view.viewport() and event.type() == QEvent.Wheel:
+            sb = self.scroll.verticalScrollBar()
+            sb.setValue(sb.value() - event.angleDelta().y())
+            return True
+        return super().eventFilter(obj, event)
 
     def apply_theme(self):
         """Re-apply theme-dependent styling after a light/dark switch."""
         self.header_frame.setStyleSheet(
             f"QFrame {{ background: {theme_color('bg')}; "
             f"border-bottom: 1px solid {theme_color('border')}; }}"
+        )
+        self.scroll.setStyleSheet(
+            f"QScrollArea {{ border: none; background: {theme_color('bg')}; }}"
         )
         self.subject_label.setStyleSheet(f"color:{theme_color('text')};")
         self.sender_name_label.setStyleSheet(f"color:{theme_color('text')};")
@@ -205,6 +458,7 @@ class EmailView(QWidget):
         self.cc_label.setText("")
         self.cc_label.setVisible(False)
         self.att_frame.setVisible(False)
+        self.img_banner.setVisible(False)
         self.body_view.setHtml("")
         for b in (self.reply_btn, self.reply_all_btn, self.forward_btn):
             b.setEnabled(False)
@@ -256,6 +510,14 @@ class EmailView(QWidget):
             self.att_list.addItem(item)
         self.att_frame.setVisible(bool(atts))
 
+        # Remote images: honour the user's "block remote images" preference.
+        # Fresh per message — reset the banner and apply the current setting
+        # before rendering. The browser emits images_blocked() if it hides
+        # any, which raises the banner.
+        from core import config
+        self.img_banner.setVisible(False)
+        self.body_view.set_block_images(bool(config.get("block_remote_images", False)))
+
         # Body: prefer HTML when available. Switch back to a WHITE page for
         # the actual message (sender HTML assumes a light background).
         self.body_view.setStyleSheet(
@@ -295,6 +557,22 @@ class EmailView(QWidget):
                 f'font-size: 10pt; color:#201f1e; '
                 f'white-space: pre-wrap;">{safe}</div>'
             )
+        # New message → scroll the unified reading pane back to the top.
+        self.scroll.verticalScrollBar().setValue(0)
+
+    def _on_images_blocked(self, count: int):
+        """The body had remote images we didn't load → offer to show them."""
+        plural = "image" if count == 1 else "images"
+        self.img_banner_label.setText(
+            f"This message has {count} remote {plural} that "
+            f"weren't downloaded to protect your privacy."
+        )
+        self.img_banner.setVisible(True)
+
+    def _show_remote_images(self):
+        """User clicked 'Show images' — re-render this message with images."""
+        self.img_banner.setVisible(False)
+        self.body_view.reload_with_images()
 
     @staticmethod
     def _split_addr(raw: str) -> tuple:
@@ -312,7 +590,10 @@ class EmailView(QWidget):
             return ""
         try:
             from datetime import datetime
-            dt = datetime.fromisoformat(iso.replace("Z", "").replace("+00:00", ""))
+            # Parse the ISO timestamp, interpreting 'Z' as UTC
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            # Convert to local time so the UI shows the user's timezone
+            dt = dt.astimezone()
             return dt.strftime("%a, %d %b %Y, %H:%M")
         except Exception:
             return iso[:16]

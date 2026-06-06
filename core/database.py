@@ -393,6 +393,37 @@ def delete_manual_contact(email: str):
     with get_conn() as conn:
         conn.execute("DELETE FROM manual_contacts WHERE email=?", (email.lower(),))
 
+
+def get_or_create_import_account(label: str = "Imported Mail") -> int:
+    """Return the id of a local-only account used to hold imported mail.
+
+    Imported messages must be attached to some account (emails.account_id is
+    NOT NULL). When the user has no account yet — or wants imports kept
+    separate — we use a dedicated local account with no server settings, so
+    it never tries to fetch/send. Reuses the account if it already exists.
+    """
+    sentinel_email = "imported@local"
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM accounts WHERE email=?", (sentinel_email,)
+        ).fetchone()
+        if row:
+            return row["id"]
+    return add_account({
+        "name": label,
+        "email": sentinel_email,
+        "pop3_host": "", "pop3_port": 0, "pop3_ssl": 1,
+        "pop3_user": "", "pop3_password": "",
+        "leave_on_server": 1,
+        "smtp_host": "", "smtp_port": 0, "smtp_security": "SSL",
+        "smtp_user": "", "smtp_password": "",
+        "signature": "",
+        "imap_host": "", "imap_port": 0, "imap_ssl": 1,
+        "junk_folder_name": "Junk", "imap_enabled": 0,
+        "junk_purge_days": 0, "junk_purge_server": 0,
+        "pop3_timeout": 30, "max_email_bytes": 0, "send_immediately": 0,
+    })
+
 # ---------- Accounts ----------
 
 
@@ -786,6 +817,8 @@ def save_draft(account_id: int, draft_id: int | None, fields: dict) -> int:
     """Insert or update a draft. Returns the draft email_id."""
     from datetime import datetime
     now = datetime.now(timezone.utc).isoformat()
+    body_plain = fields.get("body") or ""
+    body_html = fields.get("body_html") or None
     with get_conn() as conn:
         if draft_id:
             row = conn.execute(
@@ -796,14 +829,15 @@ def save_draft(account_id: int, draft_id: int | None, fields: dict) -> int:
                 conn.execute("""
                     UPDATE emails SET
                         recipients=?, cc=?, bcc=?, subject=?,
-                        body_plain=?, date_received=?
+                        body_plain=?, body_html=?, date_received=?
                     WHERE id=?
                 """, (
                     fields.get("to") or "",
                     fields.get("cc") or "",
                     fields.get("bcc") or "",
                     fields.get("subject") or "",
-                    fields.get("body") or "",
+                    body_plain,
+                    body_html,
                     now,
                     draft_id,
                 ))
@@ -814,7 +848,7 @@ def save_draft(account_id: int, draft_id: int | None, fields: dict) -> int:
                 account_id, folder, uidl, message_id, sender, recipients,
                 cc, bcc, subject, date_received, date_sent,
                 body_plain, body_html, is_read, has_attachments, raw_size
-            ) VALUES (?, 'drafts', NULL, NULL, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, 1, 0, 0)
+            ) VALUES (?, 'drafts', NULL, NULL, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 1, 0, 0)
         """, (
             account_id,
             fields.get("from") or "",
@@ -823,7 +857,8 @@ def save_draft(account_id: int, draft_id: int | None, fields: dict) -> int:
             fields.get("bcc") or "",
             fields.get("subject") or "",
             now,
-            fields.get("body") or "",
+            body_plain,
+            body_html,
         ))
         return cur.lastrowid
 

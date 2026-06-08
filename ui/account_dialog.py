@@ -539,7 +539,23 @@ class AccountDialog(QDialog):
                 self.signature_edit.toHtml()
             )
             self.signature_edit.setHtml(embedded)
-            if downloaded:
+            if failed:
+                # Some images couldn't be downloaded (proxy/firewall blocking
+                # raw.githubusercontent.com, GitHub rate-limit, or offline).
+                # Warn the user — otherwise the signature is saved with
+                # external URLs that Outlook recipients see as broken icons.
+                # The send path will retry the download as a safety net, but
+                # it's better to embed now while the user can see the result.
+                QMessageBox.warning(
+                    self, "Template inserted (some images not embedded)",
+                    f"{downloaded} image(s) embedded, but {failed} could not "
+                    f"be downloaded.\n\n"
+                    f"This usually means a firewall/proxy is blocking image "
+                    f"downloads, or you're offline. The remaining images will "
+                    f"be retried automatically when you send. To embed them "
+                    f"now, click 'Use Tunas template' again while online.",
+                )
+            elif downloaded:
                 QMessageBox.information(
                     self, "Template inserted",
                     f"Tunas template inserted with {downloaded} image(s) "
@@ -551,6 +567,7 @@ class AccountDialog(QDialog):
                 f"Could not download all images: {e}\n\n"
                 f"You can re-save later when online.",
             )
+
 
     def _validate(self) -> bool:
         d = self._collect()

@@ -8,6 +8,8 @@ import os
 import re
 import base64
 import mimetypes
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 
@@ -19,6 +21,81 @@ _DATA_URI_RE = re.compile(
     r'([\'"])',                         # group 4: closing quote
     re.IGNORECASE,
 )
+
+# External http(s) <img src> references. At send time we download these and
+# inline them as data: URIs so they later become Content-ID parts. This is the
+# safety net for signatures (e.g. the Tunas template) whose images failed to
+# embed at insert time — on some machines a corporate proxy/firewall blocks
+# raw.githubusercontent.com, GitHub rate-limits, or the user was offline when
+# inserting the template. Without this, external URLs reach the recipient
+# untouched and clients like Outlook (which block remote images by default)
+# show broken-image icons.
+_EXTERNAL_IMG_RE = re.compile(
+    r'(<img\b[^>]*\bsrc\s*=\s*[\'"])'  # group 1: <img ... src="
+    r'(https?://[^\'"]+)'              # group 2: the external URL
+    r'([\'"])',                         # group 3: closing quote
+    re.IGNORECASE,
+)
+
+_IMG_FETCH_TIMEOUT = 8          # seconds per image
+_IMG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB cap per image
+_IMG_MAX_COUNT = 20             # don't download more than this per message
+_IMG_USER_AGENT = "Mozilla/5.0 (RunLabMail; signature send)"
+
+
+def _fetch_external_image(url: str) -> tuple[str, bytes | None, str]:
+    """Download a single image. Returns (url, bytes_or_None, mime_subtype)."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _IMG_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=_IMG_FETCH_TIMEOUT) as resp:
+            ctype = resp.headers.get("Content-Type", "image/png").split(";")[0].strip()
+            data = resp.read(_IMG_MAX_BYTES + 1)
+            if len(data) > _IMG_MAX_BYTES:
+                return url, None, "png"
+        subtype = ctype.split("/", 1)[1] if "/" in ctype else "png"
+        return url, data, subtype.lower()
+    except Exception:
+        return url, None, "png"
+
+
+def _embed_external_images(html: str) -> str:
+    """Replace external http(s) <img src> with inline data: URIs.
+
+    Runs in the send path so that any signature image that wasn't embedded at
+    insert time still reaches the recipient inline. Images that can't be
+    downloaded are left as their original URL (best effort — no worse than
+    before). The returned HTML's new data: URIs are converted to Content-ID
+    parts downstream by _data_uris_to_cid().
+    """
+    urls = []
+    seen = set()
+    for m in _EXTERNAL_IMG_RE.finditer(html):
+        u = m.group(2)
+        if u in seen:
+            continue
+        seen.add(u)
+        urls.append(u)
+    if not urls:
+        return html
+
+    urls = urls[:_IMG_MAX_COUNT]
+    results: dict[str, tuple[bytes | None, str]] = {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = [ex.submit(_fetch_external_image, u) for u in urls]
+        for fut in as_completed(futures):
+            url, data, subtype = fut.result()
+            results[url] = (data, subtype)
+
+    def _replace(match: re.Match) -> str:
+        prefix, url, suffix = match.groups()
+        data, subtype = results.get(url, (None, "png"))
+        if not data:
+            return match.group(0)  # leave external URL as-is (best effort)
+        b64 = base64.b64encode(data).decode("ascii")
+        return f'{prefix}data:image/{subtype};base64,{b64}{suffix}'
+
+    return _EXTERNAL_IMG_RE.sub(_replace, html)
+
 
 
 def _data_uris_to_cid(html: str) -> tuple[str, list[tuple[str, str, bytes]]]:
@@ -125,6 +202,13 @@ def build_message(
 
     msg.set_content(body_text or "")
     if body_html:
+        # Safety net: download any remaining external http(s) images and
+        # inline them as data: URIs first. This catches signature images
+        # (e.g. the Tunas template) that failed to embed at insert time
+        # because a proxy/firewall blocked the host, GitHub rate-limited,
+        # or the user was offline. Without this, external URLs reach the
+        # recipient untouched and clients like Outlook show broken icons.
+        body_html = _embed_external_images(body_html)
         # Convert any data:image base64 URIs to proper Content-ID
         # multipart/related parts. Without this, Gmail/Outlook often
         # render data: URIs as ugly broken-attachment placeholders or

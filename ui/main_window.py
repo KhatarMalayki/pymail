@@ -854,7 +854,13 @@ class MainWindow(QMainWindow):
         if self.current_folder == "drafts":
             self._open_draft(email_id)
             return
+        # Outbox: open in compose dialog so the user can fix a typo'd
+        # recipient (or anything else) before the message goes out.
+        if self.current_folder == "outbox":
+            self._edit_outbox_entry(email_id)
+            return
         # Reuse existing window if user already opened this email
+
         if not hasattr(self, "_email_windows"):
             self._email_windows = []
         # Clean up closed windows
@@ -918,13 +924,15 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Open", lambda: self.viewer.show_email(email_id))
         menu.addSeparator()
-        # Outbox: stuck/failed mail management (resend + remove)
+        # Outbox: stuck/failed mail management (edit + resend + remove)
         if self.current_folder == "outbox":
+            menu.addAction("Edit ✏", lambda: self._edit_outbox_entry(email_id))
             menu.addAction("Resend now ↻", self._flush_outbox_now)
             menu.addAction("Remove from Outbox 🗑",
                            lambda: self._delete_outbox_entry(email_id))
             menu.exec_(self.email_list.viewport().mapToGlobal(pos))
             return
+
         menu.addAction("Mark as read", lambda: self._mark_read(email_id, True))
         menu.addAction("Mark as unread", lambda: self._mark_read(email_id, False))
         menu.addSeparator()
@@ -1285,6 +1293,72 @@ class MainWindow(QMainWindow):
         self._refresh_accounts_tree()
         self.status_label.setText("Removed from Outbox.")
 
+    def _edit_outbox_entry(self, email_id: int):
+        """Reopen a queued/stuck Outbox email in the compose dialog so the
+        user can fix a typo'd recipient (or anything else) before it goes
+        out. We parse the stored raw MIME back into editable fields, remove
+        the Outbox entry, and let the user re-queue it on Send.
+
+        This fixes the case where a message with a wrong recipient lands in
+        the Outbox and previously could only be resent (and bounce again) or
+        deleted — never corrected."""
+        row = database.get_email(email_id)
+        if not row:
+            return
+        account_id = row.get("account_id")
+
+        # Recover the full editable content from the raw MIME bytes (keeps
+        # the HTML body, embedded images, and attachments intact). Fall back
+        # to the stored plain-text fields if the raw payload is missing.
+        prefill = {
+            "to": row.get("recipients") or "",
+            "cc": row.get("cc") or "",
+            "bcc": row.get("bcc") or "",
+            "subject": row.get("subject") or "",
+            "body": row.get("body_plain") or "",
+            # Don't re-insert the signature — the body already contains it.
+            "suppress_signature": True,
+        }
+        try:
+            raw = database.get_outbox_raw(email_id)
+        except Exception:
+            raw = None
+        if raw:
+            try:
+                from core.mail_parser import parse_message
+                parsed, atts = parse_message(raw)
+                prefill["to"] = parsed.get("to") or prefill["to"]
+                prefill["cc"] = parsed.get("cc") or prefill["cc"]
+                prefill["bcc"] = parsed.get("bcc") or prefill["bcc"]
+                prefill["subject"] = parsed.get("subject") or prefill["subject"]
+                if parsed.get("body_html"):
+                    prefill["body_html"] = parsed["body_html"]
+                if parsed.get("body_plain"):
+                    prefill["body"] = parsed["body_plain"]
+                if atts:
+                    prefill["forwarded_attachments"] = atts
+            except Exception:
+                pass
+
+        # Remove the stuck entry so it isn't sent twice. If the user closes
+        # the dialog without sending, the compose auto-save keeps it as a
+        # draft, so nothing is lost.
+        try:
+            database.delete_outbox(email_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Edit failed", str(e))
+            return
+
+        dlg = ComposeDialog(self, account_id=account_id, prefill=prefill)
+        self._track_compose(dlg)
+        dlg.sent.connect(self._on_email_sent)
+        dlg.show()
+
+        self._refresh_email_list()
+        self._update_folder_counts()
+        self._refresh_accounts_tree()
+        self.status_label.setText("Editing email from Outbox.")
+
     def _on_outbox_sent(self, account_id: int, outbox_id: int):
         # Refresh whichever folder is currently visible
         if self.current_account_id == account_id and self.current_folder in (
@@ -1292,6 +1366,7 @@ class MainWindow(QMainWindow):
         ):
             self._refresh_email_list()
         self._update_folder_counts()
+
 
     def _on_outbox_flush_done(self, sent: int, failed: int):
         if sent > 0:
@@ -1409,13 +1484,54 @@ class MainWindow(QMainWindow):
         )
 
     def _on_register_error(self, err: str):
-        # Soft failure — user can still use POP3 + SMTP, we just retry
-        # auto-registration on the next successful sync. We don't nag
-        # them with a popup since the app is otherwise working fine.
+        # Soft failure — the app still works for POP3/SMTP and we retry
+        # auto-registration on the next successful sync. But we no longer
+        # fail completely silently: a network/firewall block here is the
+        # #1 cause of "kok lisensinya nggak ke-register?" so we surface a
+        # clear, actionable banner ONCE (not on every retry tick), with the
+        # Machine ID the user can send to the admin as a fallback.
         self.update_status_label.setText(
             "License registration failed (will retry)"
         )
         self.update_status_label.setToolTip(err)
+
+        # Only show the actionable banner the first time, so repeated sync
+        # cycles don't keep popping it back up while the user is working.
+        if getattr(self, "_register_error_notified", False):
+            return
+        self._register_error_notified = True
+
+        # Grab this machine's ID so the user can hand it to the admin if the
+        # Worker stays unreachable (firewall/proxy blocks outbound HTTPS).
+        try:
+            machine_id = licmod.get_machine_id()
+        except Exception:
+            machine_id = ""
+
+        is_network = "network error" in (err or "").lower()
+        if is_network:
+            detail = (
+                "RunLab Mail tidak bisa menghubungi server lisensi "
+                "(kemungkinan firewall/proxy memblokir koneksi). "
+                "Aplikasi tetap bisa dipakai; registrasi akan dicoba lagi "
+                "otomatis saat Send/Receive berikutnya."
+            )
+        else:
+            detail = (
+                "Registrasi lisensi gagal. Aplikasi tetap bisa dipakai dan "
+                "akan dicoba lagi otomatis."
+            )
+        mid_part = (
+            f" Kalau tetap gagal, kirim Machine ID ini ke admin: "
+            f"<b>{machine_id}</b>."
+            if machine_id else ""
+        )
+        self.banner.show_message(
+            f"<b>⚠ Lisensi belum ter-registrasi.</b> {detail}{mid_part}",
+            level="warning",
+            duration_ms=0,
+        )
+
 
     def _poll_worker_status(self):
         """Hit /verify on the Worker to detect admin actions (extend,

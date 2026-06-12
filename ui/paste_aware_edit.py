@@ -272,8 +272,42 @@ def _append_style(existing: str, extra: str) -> str:
     return existing + ";" + extra
 
 
+def _normalize_background_shorthand(style: str) -> str:
+    """Make Excel cell fills survive Qt's rich-text table renderer.
+
+    Excel emits cell fills as the `background:` shorthand (e.g.
+    `background:#FFFF00`). Qt's QTextDocument honors `background-color`
+    on table cells but frequently ignores the `background` shorthand, so
+    pasted fills came through colorless. When we see a `background:` whose
+    value is a plain color, we also emit an explicit `background-color:` so
+    the fill renders. The original shorthand is left in place for clients
+    that prefer it.
+    """
+    if not style or "background" not in style.lower():
+        return style
+
+    color_pat = re.compile(
+        r'(?<![-\w])background\s*:\s*'
+        r'(#[0-9a-fA-F]{3,8}|rgb[a]?\([^)]*\)|[a-zA-Z]+)\s*;?',
+        re.IGNORECASE,
+    )
+
+    def _repl(m: re.Match) -> str:
+        color = m.group(1).strip()
+        # Skip non-color shorthands (gradients/images/"none"/"transparent").
+        if color.lower() in ("none", "transparent", "inherit", "initial"):
+            return m.group(0)
+        decl = m.group(0)
+        if not decl.rstrip().endswith(";"):
+            decl = decl.rstrip() + ";"
+        return f"{decl}background-color:{color};"
+
+    return color_pat.sub(_repl, style)
+
+
 def _inline_table_class_styles(html: str) -> str:
     """Inline class-based CSS for pasted tables (e.g. Excel clipboard HTML).
+
 
     Excel usually emits styles in <style> blocks and references them via
     class="xlNN" on <table>/<tr>/<td>. Qt rich text often drops class styles,
@@ -291,28 +325,36 @@ def _inline_table_class_styles(html: str) -> str:
     for block in style_blocks:
         for m in re.finditer(r'\.([A-Za-z0-9_-]+)\s*\{([^}]*)\}', block, re.DOTALL):
             cls = m.group(1).strip()
-            style = m.group(2).strip()
+            style = _normalize_background_shorthand(m.group(2).strip())
             if cls and style:
                 class_styles[cls] = _append_style(class_styles.get(cls, ""), style)
+
 
     if not class_styles:
         return html
 
+    # Match class attributes in all three quoting styles Excel/webmail emit:
+    #   class="xl65"  class='xl65'  class=xl65   (Excel uses UNQUOTED a lot)
+    # The old pattern only matched double-quoted values, so Excel's
+    # class-based colors/fonts/backgrounds were never inlined — pasted
+    # tables lost all their formatting and kept only fallback borders.
     tag_pat = re.compile(
-        r'<([a-z0-9]+)([^>]*\sclass\s*=\s*(["\"][^"\"]+["\"]))([^>]*)>',
+        r'<([a-z0-9]+)([^>]*?\sclass\s*=\s*'
+        r'(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+)))([^>]*)>',
         re.IGNORECASE,
     )
 
     def repl(m: re.Match) -> str:
         tag = m.group(1)
         before = m.group(2)
-        class_attr = m.group(3)
-        after = m.group(4)
+        # class value is in whichever of groups 3/4/5 matched
+        class_value = m.group(3) or m.group(4) or m.group(5) or ""
+        after = m.group(6)
 
-        class_value = class_attr[1:-1]
         merged = ""
         for cls in class_value.split():
             merged = _append_style(merged, class_styles.get(cls, ""))
+
 
         attrs = before + after
         style_m = re.search(r'\bstyle\s*=\s*(["\"])(.*?)\1', attrs, re.IGNORECASE | re.DOTALL)
@@ -381,8 +423,13 @@ def _looks_like_excel_html(html: str) -> bool:
         "xmlns:x=\"urn:schemas-microsoft-com:office:excel\"" in h
         or "name=\"progid\" content=\"excel.sheet\"" in h
         or "mso-" in h
-        or bool(re.search(r'class\s*=\s*[\"\'][^\"\']*\bxl\d+\b', h))
+        # Match xlNN class refs in any quoting style Excel emits:
+        #   class="xl65"  class='xl65'  class=xl65 (unquoted is common)
+        or bool(re.search(
+            r'class\s*=\s*(?:"[^"]*\bxl\d+|\'[^\']*\bxl\d+|xl\d+)', h
+        ))
     )
+
 
 
 class _PasteWorker(QThread):

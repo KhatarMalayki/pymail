@@ -1199,9 +1199,12 @@ class ComposeDialog(QDialog):
         # Insert signature ABOVE the quoted block. We do this for replies,
         # reply-all, forward — i.e. anytime the body was prefilled by us
         # but not when reopening a draft (drafts already contain the user's
-        # exact saved state).
-        if not self.draft_id and (body_html or body_plain):
+        # exact saved state) and not when editing an Outbox message (its body
+        # already contains the signature, so re-inserting would duplicate it).
+        if (not self.draft_id and not p.get("suppress_signature")
+                and (body_html or body_plain)):
             self._prepend_signature_for_reply()
+
 
     def _add_forwarded_attachment(self, att: dict):
         """Add an attachment dict (from database.get_attachments_for_email)

@@ -4,7 +4,7 @@ Entry point.
 """
 import sys
 from pathlib import Path
-from PyQt5.QtWidgets import QApplication, QMessageBox
+from PyQt5.QtWidgets import QApplication, QMessageBox, QDialog
 from PyQt5.QtCore import Qt
 
 from core import license as licmod
@@ -44,17 +44,25 @@ def main():
         # will be auto-issued when the first POP3 fetch succeeds.
         payload = {"_unactivated": True}
     elif not ok:
-        # License exists but is invalid (revoked, expired, tampered)
-        # → show a clean explanation and quit. We don't ask for a paste
-        # because the new flow is auto-register.
-        QMessageBox.critical(
-            None, "License invalid",
-            f"{err}\n\n"
-            f"Your RunLab Mail license is no longer valid. Please contact your "
-            f"administrator to extend or reactivate it.",
+        # License exists but is invalid (revoked, expired, tampered, or bound
+        # to another device). Give the user a chance to paste a fresh key the
+        # admin generated for them. Only quit if they cancel or paste nothing
+        # valid.
+        from ui.license_dialog import LicenseActivationDialog
+        dlg = LicenseActivationDialog(
+            error=(
+                f"{err}\n\n"
+                "Your RunLab Mail license is no longer valid. Paste a new "
+                "license key from your administrator below, or send them your "
+                "Machine ID to get one."
+            )
         )
-        instance.release()
-        sys.exit(0)
+        if dlg.exec_() == QDialog.Accepted and dlg.payload:
+            # User pasted a valid key — adopt it and continue into the app.
+            payload = dlg.payload
+        else:
+            instance.release()
+            sys.exit(0)
 
     window = MainWindow(license_payload=payload or {})
     instance.another_instance_started.connect(window.bring_to_front)

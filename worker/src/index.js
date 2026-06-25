@@ -245,6 +245,20 @@ function newLicenseId() {
   return s.replace(/=+$/, "");
 }
 
+// Public IP as seen by Cloudflare's edge. CF-Connecting-IP is the real
+// client IP regardless of proxies; True-Client-IP / X-Real-IP are fallbacks.
+// This is the cleanest source for a public IP — the client can't reliably
+// discover its own public IP behind NAT, but Cloudflare always sees it.
+function clientPublicIp(request) {
+  return String(
+    request.headers.get("CF-Connecting-IP") ||
+      request.headers.get("True-Client-IP") ||
+      request.headers.get("X-Real-IP") ||
+      "",
+  ).trim();
+}
+
+
 // ---------- Endpoints ----------
 
 async function handleRegister(request, env) {
@@ -260,6 +274,10 @@ async function handleRegister(request, env) {
   const data = await loadUsers(env);
   const trialDays = parseInt(env.TRIAL_DAYS_DEFAULT || String(TRIAL_DAYS), 10);
   const now = new Date();
+  // public_ip is taken from Cloudflare's edge (most reliable); local_ip comes
+  // from the client body (only the client can see its own LAN address).
+  const publicIp = clientPublicIp(request);
+  const localIp = String(body.local_ip || "").trim();
 
   // Find existing record by machine_id (1 license per machine)
   let user = data.users.find((u) => u.machine_id === machineId);
@@ -275,6 +293,8 @@ async function handleRegister(request, env) {
       hostname: String(body.hostname || "").trim(),
       os_user: String(body.os_user || "").trim(),
       version: String(body.version || "").trim(),
+      public_ip: publicIp,
+      local_ip: localIp,
       issued_at: now.toISOString(),
       expires_at: expiresAt.toISOString(),
       first_seen: now.toISOString(),
@@ -291,6 +311,8 @@ async function handleRegister(request, env) {
     if (body.hostname) user.hostname = String(body.hostname).trim();
     if (body.os_user) user.os_user = String(body.os_user).trim();
     if (body.version) user.version = String(body.version).trim();
+    if (publicIp) user.public_ip = publicIp;
+    if (localIp) user.local_ip = localIp;
   }
 
   await saveUsers(env, data);
@@ -341,11 +363,14 @@ async function handleVerify(request, env) {
       });
     }
   }
-  // Touch last_seen and update version if provided
+  // Touch last_seen and update version / IPs if provided
   user.last_seen = new Date().toISOString();
   if (body.version) {
     user.version = String(body.version).trim();
   }
+  const verifyPublicIp = clientPublicIp(request);
+  if (verifyPublicIp) user.public_ip = verifyPublicIp;
+  if (body.local_ip) user.local_ip = String(body.local_ip).trim();
   await saveUsers(env, data);
   return json({
     valid: true,
@@ -581,7 +606,13 @@ async function handleAdminGenerate(request, env) {
     name,
     hostname: String(body.hostname || "").trim(),
     os_user: String(body.os_user || "").trim(),
-    version: "",
+    // version stays empty until the user actually runs the app and the
+    // first /register or /verify reports their installed build. Same for
+    // public_ip/local_ip — the admin can pre-seed them via the body, but
+    // they normally fill in once the user's machine checks in.
+    version: String(body.version || "").trim(),
+    public_ip: clientPublicIp(request) || String(body.public_ip || "").trim(),
+    local_ip: String(body.local_ip || "").trim(),
     issued_at: issuedAt,
     expires_at: expiresAt,
     first_seen: issuedAt,
@@ -590,6 +621,7 @@ async function handleAdminGenerate(request, env) {
     note,
   });
   await saveUsers(env, data);
+
 
   const payload = {
     license_id: licenseId,

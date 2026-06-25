@@ -29,7 +29,39 @@ from .version import __version__, LICENSE_API_URL
 # ---------- URL config ----------
 
 
+def get_local_ip() -> str:
+    """Best-effort local (LAN) IP of this machine.
+
+    Uses the classic UDP-connect trick: opening a datagram socket toward a
+    public address makes the OS pick the outbound interface, whose address we
+    then read. No packets are actually sent. Fails open (returns "") so an
+    offline machine still works — this is metadata only, never gating.
+    """
+    import socket as _socket
+    s = None
+    try:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        # 8.8.8.8 is just a routable target; nothing is transmitted for UDP
+        # connect() — it only selects the local interface.
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        # Fall back to whatever the hostname resolves to (often 127.0.0.1).
+        try:
+            return _socket.gethostbyname(_socket.gethostname())
+        except Exception:
+            return ""
+    finally:
+        try:
+            if s is not None:
+                s.close()
+        except Exception:
+            pass
+
+
 def get_api_url() -> str:
+
     """Returns the Worker base URL. Trims trailing slash for clean joins."""
     # Allow runtime override via pymail_update.json next to the .exe
     try:
@@ -101,8 +133,10 @@ def register_now(email: str, name: str="") -> dict:
         "hostname": socket.gethostname(),
         "os_user": _safe_user(),
         "version": __version__,
+        "local_ip": get_local_ip(),
         "is_new_user": not bool(licmod.load_license()),
     }
+
     resp = _post("/register", body)
     license_key = resp.get("license_key")
     if license_key:
@@ -242,11 +276,17 @@ def admin_rebind(token: str, license_id: str, machine_id: str, *,
 
 def admin_generate(token: str, email: str, name: str = "", *,
                    days: int = 0, machine_id: str = "",
-                   note: str = "") -> dict:
+                   note: str = "", hostname: str = "",
+                   local_ip: str = "") -> dict:
     """Generate a brand-new signed license and add it to the registry.
 
     days=0 means perpetual. machine_id="" issues a floating license (usable
     on any device). Returns {license_id, license_key, expires_at, floating}.
+
+    hostname/local_ip are optional pre-seed values the admin can supply; if
+    left blank they fill in automatically when the user first runs the app
+    (the /register and /verify calls report them). version is always blank
+    at generation time for the same reason — it's the user's installed build.
     """
     return _post(
         "/admin/generate",
@@ -256,6 +296,9 @@ def admin_generate(token: str, email: str, name: str = "", *,
             "days": days,
             "machine_id": machine_id,
             "note": note,
+            "hostname": hostname,
+            "local_ip": local_ip,
         },
         headers=admin_headers(token),
     )
+

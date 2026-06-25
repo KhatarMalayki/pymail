@@ -195,12 +195,14 @@ class LicenseManagerDialog(QDialog):
         layout.addLayout(btn_row)
 
         # Table
-        self.table = QTableWidget(0, 11)
+        self.table = QTableWidget(0, 13)
         self.table.setHorizontalHeaderLabels([
             "License ID", "Status", "Email", "Name",
             "Hostname", "Version", "Allowed Ver.", "Machine ID",
+            "Public IP", "Local IP",
             "Issued", "Expires", "Last seen",
         ])
+
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
@@ -221,9 +223,11 @@ class LicenseManagerDialog(QDialog):
         h.setSectionResizeMode(5, _QHV.ResizeToContents)   # Version
         h.setSectionResizeMode(6, _QHV.ResizeToContents)   # Allowed Ver.
         h.setSectionResizeMode(7, _QHV.ResizeToContents)   # Machine ID
-        h.setSectionResizeMode(8, _QHV.ResizeToContents)   # Issued
-        h.setSectionResizeMode(9, _QHV.ResizeToContents)   # Expires
-        h.setSectionResizeMode(10, _QHV.ResizeToContents)  # Last seen
+        h.setSectionResizeMode(8, _QHV.ResizeToContents)   # Public IP
+        h.setSectionResizeMode(9, _QHV.ResizeToContents)   # Local IP
+        h.setSectionResizeMode(10, _QHV.ResizeToContents)  # Issued
+        h.setSectionResizeMode(11, _QHV.ResizeToContents)  # Expires
+        h.setSectionResizeMode(12, _QHV.ResizeToContents)  # Last seen
         # Let the user still drag to override if they want.
         h.setStretchLastSection(False)
         # Click a column header to sort by that column (toggles asc/desc).
@@ -534,6 +538,7 @@ class LicenseManagerDialog(QDialog):
                 days=params["days"],
                 machine_id=params["machine_id"],
                 note=params["note"],
+                hostname=params.get("hostname", ""),
             )
 
         w = _ResultWorker(_do)
@@ -703,14 +708,19 @@ class LicenseManagerDialog(QDialog):
                     return _version_key(u.get("allowed_version") or "")
                 if col == 7:   # Machine ID
                     return (u.get("machine_id") or "").lower()
-                if col == 8:   # Issued
+                if col == 8:   # Public IP
+                    return (u.get("public_ip") or "").lower()
+                if col == 9:   # Local IP
+                    return (u.get("local_ip") or "").lower()
+                if col == 10:  # Issued
                     return _iso_to_ts(u.get("issued_at") or "")
-                if col == 9:   # Expires (perpetual sorts last when asc)
+                if col == 11:  # Expires (perpetual sorts last when asc)
                     exp = u.get("expires_at") or ""
                     return _iso_to_ts(exp) if exp else float("inf")
-                if col == 10:  # Last seen
+                if col == 12:  # Last seen
                     return _iso_to_ts(u.get("last_seen") or "")
                 return ""
+
             sorted_users = sorted(filtered_users, key=_key, reverse=self._sort_desc)
 
         # Pagination slice
@@ -740,10 +750,13 @@ class LicenseManagerDialog(QDialog):
                 u.get("version") or "",
                 u.get("allowed_version") or "(all)",
                 u.get("machine_id") or "",
+                u.get("public_ip") or "(belum ada)",
+                u.get("local_ip") or "(belum ada)",
                 (u.get("issued_at") or "")[:10],
                 (u.get("expires_at") or "(perpetual)")[:10],
                 _iso_to_local(u.get("last_seen") or ""),
             ]
+
             for c, value in enumerate(cells):
                 item = QTableWidgetItem(value)
                 if c == 0:
@@ -990,19 +1003,42 @@ class _GenerateLicenseDialog(QDialog):
             self.duration_combo.addItem(label)
         form.addRow("Validity:", self.duration_combo)
 
+        # Optional hostname so the admin-generated record isn't blank. The
+        # field fills in automatically once the user runs the app, but pre-
+        # seeding it helps identify the device in the License Manager table.
+        self.hostname_edit = QLineEdit()
+        self.hostname_edit.setPlaceholderText(
+            "Device hostname, e.g. SS-BTR-DSP (optional)"
+        )
+        form.addRow("Hostname:", self.hostname_edit)
+
+        # Default to a DEVICE-BOUND license: the Machine ID workflow is the
+        # common case (user sends their Machine ID, admin binds the license).
+        # Leave 'Floating' unchecked so the Machine ID field is visible and
+        # active by default — ticking it makes the license usable anywhere.
         self.floating_cb = QCheckBox(
             "Floating license (usable on any device)"
         )
-        self.floating_cb.setChecked(True)
+        self.floating_cb.setChecked(False)
         self.floating_cb.toggled.connect(self._on_floating_toggled)
         form.addRow("", self.floating_cb)
 
         self.machine_edit = QLineEdit()
         self.machine_edit.setPlaceholderText(
-            "Machine ID of the target device (leave blank if floating)"
+            "Paste the Machine ID the user sent you "
+            "(leave blank only for a floating license)"
         )
-        self.machine_edit.setEnabled(False)
+        self.machine_edit.setEnabled(True)
         form.addRow("Machine ID:", self.machine_edit)
+
+        hint = QLabel(
+            "Tip: minta user buka RunLab Mail → dialog License → Copy Machine "
+            "ID, lalu tempel di sini. Centang 'Floating' hanya kalau lisensi "
+            "boleh dipakai di perangkat mana saja."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#605e5c; font-size: 8pt;")
+        form.addRow("", hint)
 
         self.note_edit = QLineEdit()
         self.note_edit.setPlaceholderText("Optional note")
@@ -1053,7 +1089,9 @@ class _GenerateLicenseDialog(QDialog):
             "days": days,
             "machine_id": machine_id,
             "note": self.note_edit.text().strip(),
+            "hostname": self.hostname_edit.text().strip(),
         }
+
 
 
 class _LicenseKeyDialog(QDialog):

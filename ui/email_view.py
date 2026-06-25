@@ -260,10 +260,19 @@ class EmailView(QWidget):
         h_layout.setContentsMargins(24, 18, 24, 16)
         h_layout.setSpacing(8)
 
+        # Header text fields are plain QLabels, which by default swallow mouse
+        # selection — so users couldn't highlight/copy the To/Cc addresses
+        # without opening Reply/Forward. Enable mouse + keyboard text selection
+        # on every header label so any of them can be selected and copied
+        # (Ctrl+C) straight from the reading pane, like Outlook.
+        _selectable = Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+
         self.subject_label = QLabel()
         f = QFont(); f.setPointSize(15); f.setWeight(QFont.DemiBold)
         self.subject_label.setFont(f)
         self.subject_label.setWordWrap(True)
+        self.subject_label.setTextInteractionFlags(_selectable)
+        self.subject_label.setCursor(Qt.IBeamCursor)
         self.subject_label.setStyleSheet(f"color:{theme_color('text')};")
         h_layout.addWidget(self.subject_label)
 
@@ -283,12 +292,18 @@ class EmailView(QWidget):
         self.sender_name_label = QLabel()
         f2 = QFont(); f2.setPointSize(10); f2.setWeight(QFont.DemiBold)
         self.sender_name_label.setFont(f2)
+        self.sender_name_label.setTextInteractionFlags(_selectable)
+        self.sender_name_label.setCursor(Qt.IBeamCursor)
         self.sender_name_label.setStyleSheet(f"color:{theme_color('text')};")
         self.sender_email_label = QLabel()
+        self.sender_email_label.setTextInteractionFlags(_selectable)
+        self.sender_email_label.setCursor(Qt.IBeamCursor)
         self.sender_email_label.setStyleSheet(
             f"color:{theme_color('text_muted')}; font-size:9pt;"
         )
         self.recipients_label = QLabel()
+        self.recipients_label.setTextInteractionFlags(_selectable)
+        self.recipients_label.setCursor(Qt.IBeamCursor)
         self.recipients_label.setStyleSheet(
             f"color:{theme_color('text_muted')}; font-size:9pt;"
         )
@@ -299,6 +314,8 @@ class EmailView(QWidget):
         sender_row.addLayout(sender_text_col, 1)
 
         self.date_label = QLabel()
+        self.date_label.setTextInteractionFlags(_selectable)
+        self.date_label.setCursor(Qt.IBeamCursor)
         self.date_label.setStyleSheet(
             f"color:{theme_color('text_muted')}; font-size:9pt;"
         )
@@ -309,6 +326,8 @@ class EmailView(QWidget):
 
         # Cc (only shown if present)
         self.cc_label = QLabel()
+        self.cc_label.setTextInteractionFlags(_selectable)
+        self.cc_label.setCursor(Qt.IBeamCursor)
         self.cc_label.setStyleSheet(
             f"color:{theme_color('text_muted')}; font-size:9pt; padding-left:56px;"
         )

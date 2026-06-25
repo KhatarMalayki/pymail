@@ -285,6 +285,7 @@ async function handleRegister(request, env) {
   if (!user) {
     // Brand-new machine — issue trial
     const expiresAt = new Date(now.getTime() + trialDays * 86400000);
+    const reportedVersion = String(body.version || "").trim();
     user = {
       license_id: newLicenseId(),
       machine_id: machineId,
@@ -292,7 +293,13 @@ async function handleRegister(request, env) {
       name: String(body.name || "").trim(),
       hostname: String(body.hostname || "").trim(),
       os_user: String(body.os_user || "").trim(),
-      version: String(body.version || "").trim(),
+      version: reportedVersion,
+      // Pin a brand-new user to the version they first registered with, NOT
+      // "(all)". This stops a fresh install from immediately auto-updating to
+      // a newer build the admin hasn't vetted for them yet. Admins are the
+      // exception — they always track the latest manifest, so leave theirs
+      // unpinned. Admins are identified purely by the email allow-list.
+      allowed_version: isAdminUser({ email }, env) ? null : (reportedVersion || null),
       public_ip: publicIp,
       local_ip: localIp,
       issued_at: now.toISOString(),

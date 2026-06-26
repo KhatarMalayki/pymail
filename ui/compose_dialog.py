@@ -1323,7 +1323,20 @@ class ComposeDialog(QDialog):
         self.status_label.setText("")
 
     def _split_addrs(self, value: str):
-        return [a.strip() for a in (value or "").replace(";", ",").split(",") if a.strip()]
+        # Be liberal in what we accept so users coming from Outlook/other
+        # clients don't get tripped up. Recipients may be separated by commas
+        # OR semicolons (Outlook uses ';'), and individual addresses are often
+        # wrapped in single/double quotes (e.g. 'khatar@tunasgroup.com';).
+        # We split on both separators, then strip surrounding quotes and
+        # whitespace from each piece.
+        import re
+        parts = re.split(r"[,;]+", value or "")
+        out = []
+        for raw in parts:
+            a = raw.strip().strip("'\"").strip()
+            if a:
+                out.append(a)
+        return out
 
     def _send(self):
         if not self.accounts:

@@ -109,6 +109,38 @@ class _ResultWorker(QThread):
         except Exception as e:
             self.failed.emit(str(e))
 
+
+class _BulkWorker(QThread):
+    """Apply the same admin action to many license_ids sequentially.
+
+    `fn(license_id)` is called once per id. We keep going even if some fail,
+    then report how many succeeded/failed so one bad row doesn't abort the
+    whole batch. progress is emitted as (done_count, total) so the UI can
+    show "Processing 3/12...".
+    """
+    progress = pyqtSignal(int, int)        # done, total
+    finished_bulk = pyqtSignal(int, list)  # ok_count, [(license_id, error), ...]
+
+    def __init__(self, fn, license_ids: list):
+        super().__init__()
+        self._fn = fn
+        self._ids = list(license_ids)
+
+    def run(self):
+        ok = 0
+        errors = []
+        total = len(self._ids)
+        for i, lid in enumerate(self._ids, start=1):
+            try:
+                self._fn(lid)
+                ok += 1
+            except Exception as e:
+                errors.append((lid, str(e)))
+            self.progress.emit(i, total)
+        self.finished_bulk.emit(ok, errors)
+
+
+
 # ---------- Main dialog ----------
 
 
@@ -148,7 +180,9 @@ class LicenseManagerDialog(QDialog):
 
         info = QLabel(
             "All RunLab Mail installations that have auto-registered with your "
-            "Cloudflare Worker. Right-click a row to extend, revoke, or restore."
+            "Cloudflare Worker. Right-click a row to extend, revoke, or restore. "
+            "Ctrl-click or Shift-click to select several rows, then right-click "
+            "for bulk actions."
         )
         info.setStyleSheet("color:#605e5c;")
         info.setWordWrap(True)
@@ -204,6 +238,9 @@ class LicenseManagerDialog(QDialog):
         ])
 
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # ExtendedSelection lets the admin Ctrl-click / Shift-click multiple
+        # rows, then right-click for a bulk Extend/Revoke/Restore/Delete menu.
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -769,11 +806,38 @@ class LicenseManagerDialog(QDialog):
                 self.table.setItem(row, c, item)
 
     # ----- Actions -----
+    def _selected_license_ids(self) -> list:
+        """Return license_ids for every selected row (de-duplicated, in the
+        order they appear). Used to decide between single- and bulk-action
+        menus."""
+        rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()})
+        ids = []
+        for r in rows:
+            item = self.table.item(r, 0)
+            if item and item.text():
+                ids.append(item.text())
+        return ids
+
     def _show_menu(self, pos):
         idx = self.table.indexAt(pos)
         if not idx.isValid():
             return
-        row = idx.row()
+
+        # If the row under the cursor isn't part of the current selection,
+        # treat this as a single-row action on that row (matches typical
+        # table UX). Otherwise act on the whole selection.
+        clicked_row = idx.row()
+        selected_ids = self._selected_license_ids()
+        clicked_id = self.table.item(clicked_row, 0).text()
+        if clicked_id not in selected_ids:
+            selected_ids = [clicked_id]
+            self.table.selectRow(clicked_row)
+
+        if len(selected_ids) > 1:
+            self._show_bulk_menu(pos, selected_ids)
+            return
+
+        row = clicked_row
         license_id = self.table.item(row, 0).text()
         status = self.table.item(row, 1).text().lower()
         name = self.table.item(row, 3).text() or self.table.item(row, 2).text()
@@ -824,6 +888,161 @@ class LicenseManagerDialog(QDialog):
             lambda: self._delete_user(license_id, name),
         )
         menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def _show_bulk_menu(self, pos, license_ids: list):
+        """Context menu shown when multiple rows are selected. Actions apply
+        to every selected license."""
+        n = len(license_ids)
+        menu = QMenu(self)
+        header = menu.addAction(f"{n} licenses selected")
+        header.setEnabled(False)
+        menu.addSeparator()
+
+        ext_menu = menu.addMenu(f"⏱  Extend {n} licenses")
+        for label, days in [
+            ("+30 days", 30),
+            ("+90 days", 90),
+            ("+1 year", 365),
+            ("Make perpetual (no expiry)", 0),
+            ("Custom...", -1),
+        ]:
+            ext_menu.addAction(
+                label,
+                lambda d=days, ids=license_ids: self._bulk_extend(ids, d),
+            )
+
+        menu.addSeparator()
+        menu.addAction(
+            f"🚫  Revoke {n} licenses...",
+            lambda ids=license_ids: self._bulk_revoke(ids),
+        )
+        menu.addAction(
+            f"✓  Restore {n} licenses",
+            lambda ids=license_ids: self._bulk_restore(ids),
+        )
+        menu.addSeparator()
+        menu.addAction(
+            f"🚀  Push specific version to {n} users...",
+            lambda ids=license_ids: self._bulk_push_version(ids),
+        )
+        menu.addSeparator()
+        menu.addAction(
+            f"🗑  Delete {n} licenses (remove permanently)...",
+            lambda ids=license_ids: self._bulk_delete(ids),
+        )
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def _run_bulk(self, fn, license_ids: list, verb: str):
+        """Run `fn(license_id)` across all license_ids on a background thread
+        and report a summary when done."""
+        total = len(license_ids)
+        self.status_label.setText(f"{verb} 0/{total}...")
+        worker = _BulkWorker(fn, license_ids)
+        worker.progress.connect(
+            lambda done, tot: self.status_label.setText(f"{verb} {done}/{tot}...")
+        )
+        worker.finished_bulk.connect(
+            lambda ok, errors: self._on_bulk_done(verb, ok, errors)
+        )
+        worker.start()
+        self._action_worker = worker  # keep ref alive
+
+    def _on_bulk_done(self, verb: str, ok: int, errors: list):
+        if errors:
+            detail = "\n".join(f"  • {lid}: {err}" for lid, err in errors[:10])
+            more = f"\n…and {len(errors) - 10} more" if len(errors) > 10 else ""
+            QMessageBox.warning(
+                self, f"{verb} finished with errors",
+                f"{ok} succeeded, {len(errors)} failed.\n\n{detail}{more}",
+            )
+        self.status_label.setText(
+            f"{verb} done: {ok} ok"
+            + (f", {len(errors)} failed" if errors else "")
+            + ". Refreshing..."
+        )
+        self._load()
+
+    def _bulk_extend(self, license_ids: list, days: int):
+        if days == -1:
+            days, ok = QInputDialog.getInt(
+                self, "Custom duration",
+                "Days from today (0 = perpetual):",
+                value=180, min=0, max=3650,
+            )
+            if not ok:
+                return
+        n = len(license_ids)
+        confirm_msg = (
+            f"Make {n} licenses PERPETUAL (never expires)?"
+            if days == 0 else
+            f"Extend {n} licenses by {days} days from today?"
+        )
+        if QMessageBox.question(
+            self, "Confirm bulk extend", confirm_msg,
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Yes,
+        ) != QMessageBox.Yes:
+            return
+        self._run_bulk(
+            lambda lid: license_client.admin_extend(self._token, lid, days),
+            license_ids, "Extending",
+        )
+
+    def _bulk_revoke(self, license_ids: list):
+        reason, ok = QInputDialog.getText(
+            self, "Revoke licenses",
+            f"Reason for revoking {len(license_ids)} licenses?",
+            text="No longer authorized",
+        )
+        if not ok:
+            return
+        self._run_bulk(
+            lambda lid: license_client.admin_revoke(self._token, lid, reason),
+            license_ids, "Revoking",
+        )
+
+    def _bulk_restore(self, license_ids: list):
+        if QMessageBox.question(
+            self, "Restore licenses?",
+            f"Restore {len(license_ids)} licenses?",
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Yes,
+        ) != QMessageBox.Yes:
+            return
+        self._run_bulk(
+            lambda lid: license_client.admin_restore(self._token, lid),
+            license_ids, "Restoring",
+        )
+
+    def _bulk_push_version(self, license_ids: list):
+        from core.version import __version__
+        ver, ok = QInputDialog.getText(
+            self, f"Push version to {len(license_ids)} users",
+            "Enter the version to allow for the selected users:",
+            QLineEdit.Normal, __version__,
+        )
+        if not ok or not ver.strip():
+            return
+        ver = ver.strip()
+        self._run_bulk(
+            lambda lid: license_client.admin_push_version_single(
+                self._token, lid, ver
+            ),
+            license_ids, "Pushing version",
+        )
+
+    def _bulk_delete(self, license_ids: list):
+        if QMessageBox.warning(
+            self, "Permanently delete?",
+            f"Permanently REMOVE {len(license_ids)} licenses from the "
+            f"registry?\n\nThis is different from Revoke — the rows will be "
+            f"gone entirely. Use this only for test accounts or "
+            f"confirmed-departed users.",
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel,
+        ) != QMessageBox.Yes:
+            return
+        self._run_bulk(
+            lambda lid: license_client.admin_delete(self._token, lid),
+            license_ids, "Deleting",
+        )
 
     def _copy_selected_id(self):
         rows = self.table.selectionModel().selectedRows()

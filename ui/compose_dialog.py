@@ -214,9 +214,14 @@ class ComposeDialog(QDialog):
         vlayout.addWidget(self.att_widget)
         
         # 3. Body styling - expand to fit content, NO internal scrollbar
+        # The compose surface is ALWAYS white, so the text color must be a
+        # fixed dark value. Without an explicit color, dark mode hands the
+        # editor a light-gray palette text color which then paints gray-on-
+        # white — the user's typed text (above the signature) became almost
+        # invisible. Pin a dark color so typing is readable in any theme.
         self.body_edit.setStyleSheet(
-            "QTextEdit { background:#ffffff; border:none; padding:16px 20px; "
-            "font-size:10pt; }"
+            "QTextEdit { background:#ffffff; color:#201f1e; border:none; "
+            "padding:16px 20px; font-size:10pt; }"
         )
         self.body_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.body_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -835,11 +840,22 @@ class ComposeDialog(QDialog):
         # is one empty line for the user to start typing in. (Was 2; that's
         # why the user had to press Enter twice to "escape" the formatting.)
         if self._is_html(sig):
-            cursor.insertBlock()
-            # Markers are embedded INLINE at the signature's edges and the
-            # whole thing is inserted in ONE call, so they never get their
-            # own blank line above the signature.
-            cursor.insertHtml(self._wrap_signature_with_markers(sig_html))
+            # Build the whole body in ONE setHtml() pass (one empty typing
+            # line, then the signature) instead of insertHtml() at end-of-doc.
+            # insertHtml() at the document end would silently drop the
+            # signature's trailing blocks for table-based signatures — that's
+            # why brand-new emails lost the phone/fax + social-icon row at the
+            # bottom while replies (which already use setHtml) kept it.
+            wrapped_sig = self._wrap_signature_with_markers(sig_html)
+            combined = (
+                '<div style="font-family:\'Segoe UI\',sans-serif;'
+                'font-size:10pt;color:#201f1e;">'
+                '<p style="margin:0;"><br></p>'
+                f'<div style="margin:0;background:transparent;">{wrapped_sig}</div>'
+                '</div>'
+            )
+            self.body_edit.setHtml(combined)
+            cursor = self.body_edit.textCursor()
         else:
             cursor.insertText("\n-- \n" + sig + "\n")
 
@@ -849,7 +865,9 @@ class ComposeDialog(QDialog):
         cursor.movePosition(cursor.Start)
         default_char = QTextCharFormat()
         default_char.setFont(QFont("Segoe UI", 10))
-        default_char.clearForeground()
+        # Pin a dark foreground (not clearForeground) so typed text stays
+        # readable on the always-white compose surface even in dark theme.
+        default_char.setForeground(QColor("#201f1e"))
         default_char.clearBackground()
         cursor.setCharFormat(default_char)
 
@@ -926,7 +944,9 @@ class ComposeDialog(QDialog):
         cursor.movePosition(cursor.Start)
         default_char = QTextCharFormat()
         default_char.setFont(QFont("Segoe UI", 10))
-        default_char.clearForeground()
+        # Pin a dark foreground (not clearForeground) so typed text stays
+        # readable on the always-white compose surface even in dark theme.
+        default_char.setForeground(QColor("#201f1e"))
         default_char.clearBackground()
         cursor.setCharFormat(default_char)
 

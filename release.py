@@ -248,6 +248,7 @@ def main():
             "--hidden-import", "pythoncom",
             "--hidden-import", "pywintypes",
             "--hidden-import", "mailbox",
+            "--hidden-import", "PyQt5.QtPrintSupport",
             "main.py",
         ]
         icon = ROOT / "resources" / "pymail.ico"

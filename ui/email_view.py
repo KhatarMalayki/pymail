@@ -341,13 +341,16 @@ class EmailView(QWidget):
         self.reply_btn = QPushButton("↩  Reply")
         self.reply_all_btn = QPushButton("↩↩  Reply All")
         self.forward_btn = QPushButton("➡  Forward")
-        for b in (self.reply_btn, self.reply_all_btn, self.forward_btn):
+        self.print_btn = QPushButton("🖨  Print")
+        for b in (self.reply_btn, self.reply_all_btn, self.forward_btn,
+                  self.print_btn):
             b.setCursor(Qt.PointingHandCursor)
             btn_row.addWidget(b)
         btn_row.addStretch(1)
         self.reply_btn.clicked.connect(lambda: self.reply_requested.emit(self.email, "reply"))
         self.reply_all_btn.clicked.connect(lambda: self.reply_requested.emit(self.email, "reply_all"))
         self.forward_btn.clicked.connect(lambda: self.reply_requested.emit(self.email, "forward"))
+        self.print_btn.clicked.connect(self._print_email)
         h_layout.addLayout(btn_row)
 
         # Attachments (below header, outside scroll)
@@ -479,7 +482,8 @@ class EmailView(QWidget):
         self.att_frame.setVisible(False)
         self.img_banner.setVisible(False)
         self.body_view.setHtml("")
-        for b in (self.reply_btn, self.reply_all_btn, self.forward_btn):
+        for b in (self.reply_btn, self.reply_all_btn, self.forward_btn,
+                  self.print_btn):
             b.setEnabled(False)
 
     def show_email(self, email_id: int):
@@ -516,7 +520,8 @@ class EmailView(QWidget):
         else:
             self.cc_label.setVisible(False)
 
-        for b in (self.reply_btn, self.reply_all_btn, self.forward_btn):
+        for b in (self.reply_btn, self.reply_all_btn, self.forward_btn,
+                  self.print_btn):
             b.setEnabled(True)
 
         # Attachments
@@ -592,6 +597,83 @@ class EmailView(QWidget):
         """User clicked 'Show images' — re-render this message with images."""
         self.img_banner.setVisible(False)
         self.body_view.reload_with_images()
+
+    def _print_email(self):
+        """Open the system print dialog (with preview) for the current email.
+
+        We build a fresh QTextDocument containing a small header block
+        (subject, from, to, cc, date) followed by the message body, so the
+        printout looks like a proper email rather than just the raw body.
+        The preview dialog lets the user pick a physical printer OR
+        "Microsoft Print to PDF" / "Save as PDF" to keep a digital copy.
+        """
+        if not self.email:
+            return
+        try:
+            from PyQt5.QtPrintSupport import QPrinter, QPrintPreviewDialog
+            from PyQt5.QtGui import QTextDocument
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Print unavailable",
+                f"Printing support could not be loaded: {e}",
+            )
+            return
+
+        import html as _html
+        email = self.email
+        subject = email.get("subject") or "(no subject)"
+        sender = email.get("sender") or ""
+        to = email.get("recipients") or ""
+        cc = email.get("cc") or ""
+        date = email.get("date_sent") or email.get("date_received") or ""
+        date_pretty = self._format_date(date)
+
+        # Body: reuse what the viewer resolved. Prefer the rendered HTML in
+        # the body view so the printout matches what the user sees (signature,
+        # formatting, inlined images included).
+        body_html = self.body_view.toHtml()
+
+        def _row(label, value):
+            if not value:
+                return ""
+            return (
+                f'<tr><td style="padding:1px 8px 1px 0;color:#555;'
+                f'white-space:nowrap;vertical-align:top;"><b>{label}</b></td>'
+                f'<td style="padding:1px 0;color:#111;">'
+                f'{_html.escape(value)}</td></tr>'
+            )
+
+        header_html = (
+            '<div style="font-family:Segoe UI,Arial,sans-serif;'
+            'font-size:11pt;color:#111;">'
+            f'<div style="font-size:15pt;font-weight:bold;margin-bottom:8px;">'
+            f'{_html.escape(subject)}</div>'
+            '<table style="font-size:10pt;border-collapse:collapse;'
+            'margin-bottom:10px;">'
+            + _row("From:", sender)
+            + _row("To:", to)
+            + _row("Cc:", cc)
+            + _row("Date:", date_pretty)
+            + '</table>'
+            '<hr style="border:none;border-top:1px solid #bbb;margin:0 0 12px 0;">'
+            '</div>'
+        )
+
+        doc = QTextDocument()
+        # Embed the body inside the header wrapper. We strip the body's own
+        # <html>/<body> wrapper isn't necessary — QTextDocument handles a
+        # full HTML string, and concatenating the header in front renders
+        # both sections in order.
+        doc.setHtml(header_html + body_html)
+
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setDocName(subject)
+
+        preview = QPrintPreviewDialog(printer, self)
+        preview.setWindowTitle("Print preview")
+        preview.resize(900, 700)
+        preview.paintRequested.connect(doc.print_)
+        preview.exec_()
 
     @staticmethod
     def _split_addr(raw: str) -> tuple:

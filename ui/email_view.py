@@ -254,7 +254,22 @@ class _PrintPreviewDialog(QDialog):
         self._default_name = default_name
 
         self.setWindowTitle("Print")
-        self.resize(820, 760)
+        # Size to fit the available screen so the action buttons at the
+        # bottom are never pushed off-screen (a fixed 760px height overflowed
+        # smaller/scaled displays). Cap to ~90% of the available work area
+        # and center the dialog.
+        try:
+            from PyQt5.QtWidgets import QApplication
+            avail = QApplication.primaryScreen().availableGeometry()
+            w = min(820, int(avail.width() * 0.9))
+            h = min(760, int(avail.height() * 0.9))
+            self.resize(w, h)
+            self.move(
+                avail.left() + (avail.width() - w) // 2,
+                avail.top() + (avail.height() - h) // 2,
+            )
+        except Exception:
+            self.resize(820, 700)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

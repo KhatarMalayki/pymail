@@ -288,6 +288,12 @@ class _PrintPreviewDialog(QDialog):
         self.printer_combo.currentIndexChanged.connect(self._on_printer_changed)
         bar_l.addWidget(self.printer_combo, 1)
 
+        bar_l.addWidget(QLabel("Layout:"))
+        self.orient_combo = QComboBox()
+        self.orient_combo.addItems(["Portrait", "Landscape"])
+        self.orient_combo.currentIndexChanged.connect(self._on_orient_changed)
+        bar_l.addWidget(self.orient_combo)
+
         zoom_out = QPushButton("－")
         zoom_in = QPushButton("＋")
         for b in (zoom_out, zoom_in):
@@ -347,6 +353,14 @@ class _PrintPreviewDialog(QDialog):
         if name and name != "(no printers)":
             self._printer.setPrinterName(name)
             self.preview.updatePreview()
+
+    def _on_orient_changed(self, _idx):
+        from PyQt5.QtPrintSupport import QPrinter
+        landscape = self.orient_combo.currentText() == "Landscape"
+        self._printer.setOrientation(
+            QPrinter.Landscape if landscape else QPrinter.Portrait
+        )
+        self.preview.updatePreview()
 
     def _render(self, printer):
         self._doc.print_(printer)
@@ -735,6 +749,37 @@ class EmailView(QWidget):
         self.img_banner.setVisible(False)
         self.body_view.reload_with_images()
 
+    @staticmethod
+    def _constrain_print_images(html: str) -> str:
+        """Make images fit the printable page width so they don't overflow
+        the paper edge or split across pages. We inject a max-width:100% +
+        height:auto style and strip any fixed width/height larger than the
+        page, preserving aspect ratio."""
+        import re
+        if not html:
+            return html
+
+        def _fix(m):
+            tag = m.group(0)
+            # Drop explicit width/height attributes (they force oversize).
+            tag = re.sub(r'\s(width|height)\s*=\s*"[^"]*"', "", tag, flags=re.IGNORECASE)
+            tag = re.sub(r"\s(width|height)\s*=\s*'[^']*'", "", tag, flags=re.IGNORECASE)
+            # Ensure a style that caps the rendered size to the page width.
+            style = "max-width:100%;height:auto;"
+            sm = re.search(r'style\s*=\s*"([^"]*)"', tag, flags=re.IGNORECASE)
+            if sm:
+                # Remove any hard width/height in the existing style, then append.
+                existing = re.sub(
+                    r'(?:max-)?(?:width|height)\s*:[^;]*;?', "", sm.group(1),
+                    flags=re.IGNORECASE,
+                )
+                tag = tag[:sm.start(1)] + existing + style + tag[sm.end(1):]
+            else:
+                tag = tag[:-1].rstrip() + f' style="{style}">'
+            return tag
+
+        return re.sub(r'<img\b[^>]*>', _fix, html, flags=re.IGNORECASE)
+
     def _print_email(self):
         """Open the system print dialog (with preview) for the current email.
 
@@ -769,6 +814,10 @@ class EmailView(QWidget):
         # the body view so the printout matches what the user sees (signature,
         # formatting, inlined images included).
         body_html = self.body_view.toHtml()
+        # Constrain images so they never overflow the page width (which made
+        # banners spill past the paper edge / split awkwardly). max-width:100%
+        # + height:auto keeps aspect ratio while fitting the printable width.
+        body_html = self._constrain_print_images(body_html)
 
         def _row(label, value):
             if not value:

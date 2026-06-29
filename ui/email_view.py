@@ -610,7 +610,9 @@ class EmailView(QWidget):
         if not self.email:
             return
         try:
-            from PyQt5.QtPrintSupport import QPrinter, QPrintPreviewDialog
+            from PyQt5.QtPrintSupport import (
+                QPrinter, QPrintDialog, QPrintPreviewDialog,
+            )
             from PyQt5.QtGui import QTextDocument
         except Exception as e:
             QMessageBox.warning(
@@ -669,11 +671,16 @@ class EmailView(QWidget):
         printer = QPrinter(QPrinter.HighResolution)
         printer.setDocName(subject)
 
-        preview = QPrintPreviewDialog(printer, self)
-        preview.setWindowTitle("Print preview")
-        preview.resize(900, 700)
-        preview.paintRequested.connect(doc.print_)
-        preview.exec_()
+        # Show the standard Windows print dialog: it has the printer
+        # dropdown (including "Microsoft Print to PDF" to save a PDF), page
+        # range, copies, and a clear Print button. This is the familiar
+        # dialog users expect from Word/Outlook — much clearer than a
+        # preview window whose tiny printer icon was easy to miss.
+        dlg = QPrintDialog(printer, self)
+        dlg.setWindowTitle("Print")
+        if dlg.exec_() != QPrintDialog.Accepted:
+            return
+        doc.print_(printer)
 
     @staticmethod
     def _split_addr(raw: str) -> tuple:

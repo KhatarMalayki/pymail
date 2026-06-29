@@ -6,7 +6,7 @@ import tempfile
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextBrowser, QFrame,
     QPushButton, QListWidget, QListWidgetItem, QFileDialog, QMessageBox,
-    QMenu, QScrollArea, QSizePolicy,
+    QMenu, QScrollArea, QSizePolicy, QDialog, QComboBox,
 )
 from PyQt5.QtCore import Qt, QUrl, pyqtSignal, QSize, QRect, QTimer, QThread
 from PyQt5.QtGui import (
@@ -234,6 +234,128 @@ class NetworkAwareTextBrowser(QTextBrowser):
         pos = vbar.value()
         super().setHtml(self._current_html)
         vbar.setValue(pos)
+
+
+class _PrintPreviewDialog(QDialog):
+    """Self-contained print dialog with a Qt-rendered preview.
+
+    We render the preview ourselves with QPrintPreviewWidget instead of
+    relying on the OS print dialog's preview pane — the modern Windows
+    dialog shows "This app doesn't support print preview" because Qt
+    doesn't implement the callback it expects. This dialog always shows a
+    correct preview and gives clear Print / Save as PDF / Close buttons.
+    """
+
+    def __init__(self, document, printer, default_name: str = "email", parent=None):
+        super().__init__(parent)
+        from PyQt5.QtPrintSupport import QPrintPreviewWidget
+        self._doc = document
+        self._printer = printer
+        self._default_name = default_name
+
+        self.setWindowTitle("Print")
+        self.resize(820, 760)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Toolbar: printer picker + zoom
+        bar = QFrame()
+        bar.setStyleSheet("QFrame { background:#f3f2f1; border-bottom:1px solid #d0d0d0; }")
+        bar_l = QHBoxLayout(bar)
+        bar_l.setContentsMargins(12, 8, 12, 8)
+        bar_l.setSpacing(8)
+
+        bar_l.addWidget(QLabel("Printer:"))
+        self.printer_combo = QComboBox()
+        self._populate_printers()
+        self.printer_combo.currentIndexChanged.connect(self._on_printer_changed)
+        bar_l.addWidget(self.printer_combo, 1)
+
+        zoom_out = QPushButton("－")
+        zoom_in = QPushButton("＋")
+        for b in (zoom_out, zoom_in):
+            b.setFixedWidth(34)
+            b.setCursor(Qt.PointingHandCursor)
+        zoom_out.clicked.connect(lambda: self.preview.zoomOut(1.15))
+        zoom_in.clicked.connect(lambda: self.preview.zoomIn(1.15))
+        bar_l.addWidget(zoom_out)
+        bar_l.addWidget(zoom_in)
+        layout.addWidget(bar)
+
+        # The actual preview
+        self.preview = QPrintPreviewWidget(self._printer)
+        self.preview.paintRequested.connect(self._render)
+        self.preview.fitToWidth()
+        layout.addWidget(self.preview, 1)
+
+        # Action buttons
+        btns = QFrame()
+        btns.setStyleSheet("QFrame { background:#faf9f8; border-top:1px solid #d0d0d0; }")
+        btns_l = QHBoxLayout(btns)
+        btns_l.setContentsMargins(12, 10, 12, 10)
+        btns_l.setSpacing(8)
+        btns_l.addStretch(1)
+
+        self.pdf_btn = QPushButton("Save as PDF...")
+        self.print_btn = QPushButton("🖨  Print")
+        self.print_btn.setDefault(True)
+        cancel_btn = QPushButton("Close")
+        for b in (self.pdf_btn, self.print_btn, cancel_btn):
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumWidth(110)
+        self.pdf_btn.clicked.connect(self._save_pdf)
+        self.print_btn.clicked.connect(self._do_print)
+        cancel_btn.clicked.connect(self.reject)
+        btns_l.addWidget(self.pdf_btn)
+        btns_l.addWidget(self.print_btn)
+        btns_l.addWidget(cancel_btn)
+        layout.addWidget(btns)
+
+    def _populate_printers(self):
+        from PyQt5.QtPrintSupport import QPrinterInfo
+        self.printer_combo.clear()
+        names = [p.printerName() for p in QPrinterInfo.availablePrinters()]
+        # Ensure the currently-selected printer is present/selected.
+        current = self._printer.printerName()
+        if current and current not in names:
+            names.insert(0, current)
+        if not names:
+            names = [current] if current else ["(no printers)"]
+        self.printer_combo.addItems(names)
+        if current in names:
+            self.printer_combo.setCurrentIndex(names.index(current))
+
+    def _on_printer_changed(self, _idx):
+        name = self.printer_combo.currentText()
+        if name and name != "(no printers)":
+            self._printer.setPrinterName(name)
+            self.preview.updatePreview()
+
+    def _render(self, printer):
+        self._doc.print_(printer)
+
+    def _do_print(self):
+        # Render to the selected printer and close.
+        self._doc.print_(self._printer)
+        self.accept()
+
+    def _save_pdf(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save as PDF", f"{self._default_name}.pdf", "PDF files (*.pdf)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        from PyQt5.QtPrintSupport import QPrinter as _QPrinter
+        pdf = _QPrinter(_QPrinter.HighResolution)
+        pdf.setOutputFormat(_QPrinter.PdfFormat)
+        pdf.setOutputFileName(path)
+        self._doc.print_(pdf)
+        QMessageBox.information(self, "Saved", f"Saved PDF to:\n{path}")
+        self.accept()
 
 
 class EmailView(QWidget):
@@ -610,9 +732,7 @@ class EmailView(QWidget):
         if not self.email:
             return
         try:
-            from PyQt5.QtPrintSupport import (
-                QPrinter, QPrintDialog, QPrintPreviewDialog,
-            )
+            from PyQt5.QtPrintSupport import QPrinter
             from PyQt5.QtGui import QTextDocument
         except Exception as e:
             QMessageBox.warning(
@@ -671,16 +791,15 @@ class EmailView(QWidget):
         printer = QPrinter(QPrinter.HighResolution)
         printer.setDocName(subject)
 
-        # Show the standard Windows print dialog: it has the printer
-        # dropdown (including "Microsoft Print to PDF" to save a PDF), page
-        # range, copies, and a clear Print button. This is the familiar
-        # dialog users expect from Word/Outlook — much clearer than a
-        # preview window whose tiny printer icon was easy to miss.
-        dlg = QPrintDialog(printer, self)
-        dlg.setWindowTitle("Print")
-        if dlg.exec_() != QPrintDialog.Accepted:
-            return
-        doc.print_(printer)
+        # Use our own preview dialog (Qt-rendered preview + clear Print /
+        # Save as PDF buttons). The native Windows print dialog's preview
+        # pane shows "This app doesn't support print preview" because Qt
+        # doesn't implement the callback it wants — so we avoid it entirely.
+        safe_name = "".join(
+            c for c in subject if c.isalnum() or c in " -_"
+        ).strip()[:60] or "email"
+        dlg = _PrintPreviewDialog(doc, printer, default_name=safe_name, parent=self)
+        dlg.exec_()
 
     @staticmethod
     def _split_addr(raw: str) -> tuple:

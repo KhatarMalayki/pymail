@@ -214,12 +214,17 @@ class EmailItemDelegate(QStyledItemDelegate):
                           rect.top() + d["sender_y"], date_w, 16)
         painter.drawText(date_rect, Qt.AlignRight | Qt.AlignVCenter, date_str)
 
-        # Follow-up flag indicator (Outlook-style) just under the date.
-        if bool(index.data(ROLE_FLAGGED)):
+        # Follow-up flag indicator (Outlook-style) on the top row, to the LEFT
+        # of the date. Kept on the date row (not the subject row) so it never
+        # overlaps the attachment paperclip, which lives on the subject line.
+        is_flagged = bool(index.data(ROLE_FLAGGED))
+        flag_w = 0
+        if is_flagged:
+            flag_w = 20
             painter.setFont(QFont("Segoe UI Symbol", 10))
             painter.setPen(QPen(QColor("#d13438")))  # red flag
-            flag_rect = QRect(rect.right() - self.RIGHT_PAD - 18,
-                              rect.top() + d["sender_y"] + 18, 18, 16)
+            flag_rect = QRect(date_rect.left() - flag_w, rect.top() + d["sender_y"],
+                              flag_w, 16)
             painter.drawText(flag_rect, Qt.AlignRight | Qt.AlignVCenter, "\U0001F6A9")
 
         # Sender
@@ -228,7 +233,7 @@ class EmailItemDelegate(QStyledItemDelegate):
         painter.setFont(f_sender)
         fm_sender = QFontMetrics(f_sender)
         sender_display = self._clean_sender(sender)
-        sender_w_avail = (date_rect.left() - 8) - text_x
+        sender_w_avail = (date_rect.left() - flag_w - 8) - text_x
         sender_elided = fm_sender.elidedText(
             sender_display, Qt.ElideRight, sender_w_avail
         )
@@ -455,6 +460,22 @@ class EmailListWidget(QListWidget):
                 it.setData(ROLE_FLAGGED, bool(flagged))
                 self.update(self.indexFromItem(it))
                 break
+
+    def email_ids_for_item(self, item) -> list:
+        """Return every email id represented by a row. For a collapsed thread
+        head that's the head plus all its children; for a normal row it's just
+        that one id. Lets actions (mark read, flag) apply to the whole
+        conversation the user sees, not only the visible head."""
+        if item is None:
+            return []
+        ids = [item.data(ROLE_EMAIL_ID)]
+        if item.data(ROLE_THREAD_ROLE) == "head":
+            key = item.data(ROLE_THREAD_KEY)
+            for child in self._thread_children.get(key, []):
+                cid = child.get("id")
+                if cid is not None:
+                    ids.append(cid)
+        return [i for i in ids if i is not None]
 
     # ---------- Threading: expand / collapse ----------
     def reset_threads(self, folder: str):

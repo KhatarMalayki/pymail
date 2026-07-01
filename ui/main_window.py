@@ -924,6 +924,10 @@ class MainWindow(QMainWindow):
         if not item:
             return
         email_id = item.data(ROLE_EMAIL_ID)
+        # For a collapsed thread head, actions should cover the whole
+        # conversation (head + children), otherwise "mark as read" on a
+        # thread appears to do nothing because unread children remain.
+        thread_ids = self.email_list.email_ids_for_item(item)
         menu = QMenu(self)
         menu.addAction("Open", lambda: self.viewer.show_email(email_id))
         menu.addSeparator()
@@ -936,18 +940,18 @@ class MainWindow(QMainWindow):
             menu.exec_(self.email_list.viewport().mapToGlobal(pos))
             return
 
-        menu.addAction("Mark as read", lambda: self._mark_read(email_id, True))
-        menu.addAction("Mark as unread", lambda: self._mark_read(email_id, False))
+        menu.addAction("Mark as read", lambda: self._mark_read(thread_ids, True))
+        menu.addAction("Mark as unread", lambda: self._mark_read(thread_ids, False))
         menu.addAction("Mark all as read", self._mark_all_read)
         menu.addSeparator()
         # Follow-up flag (Outlook-style). Toggle based on current state.
         is_flagged = bool(item.data(ROLE_FLAGGED))
         if is_flagged:
             menu.addAction("⚑  Clear flag",
-                           lambda: self._set_flag(email_id, False))
+                           lambda: self._set_flag(thread_ids, False))
         else:
             menu.addAction("🚩  Flag for follow-up",
-                           lambda: self._set_flag(email_id, True))
+                           lambda: self._set_flag(thread_ids, True))
         menu.addSeparator()
         if self.current_folder == "spam":
             menu.addAction("Not junk (move to Inbox)",
@@ -1028,14 +1032,19 @@ class MainWindow(QMainWindow):
         self._update_folder_counts()
 
     def _mark_read(self, email_id, read):
-        database.mark_read(email_id, read)
+        ids = email_id if isinstance(email_id, (list, tuple)) else [email_id]
+        for eid in ids:
+            database.mark_read(eid, read)
         self._refresh_email_list()
         self._update_folder_counts()
 
     def _set_flag(self, email_id, flagged):
-        database.set_flagged(email_id, flagged)
-        # Instant visual update without a full reload.
-        self.email_list.set_flagged_visual(email_id, flagged)
+        ids = email_id if isinstance(email_id, (list, tuple)) else [email_id]
+        for eid in ids:
+            database.set_flagged(eid, flagged)
+        # Instant visual update on the visible (head) row without a reload.
+        if ids:
+            self.email_list.set_flagged_visual(ids[0], flagged)
 
     def _mark_all_read(self):
         if self.current_account_id is None:

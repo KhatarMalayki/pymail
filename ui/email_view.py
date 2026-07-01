@@ -299,13 +299,17 @@ class _PrintPreviewDialog(QDialog):
         self.orient_combo.currentIndexChanged.connect(self._on_orient_changed)
         bar_l.addWidget(self.orient_combo)
 
-        # Fit-image-to-page toggle (on by default): scales big posters so the
-        # whole image lands on one page instead of splitting across pages.
-        from PyQt5.QtWidgets import QCheckBox
-        self.fit_chk = QCheckBox("Fit images to page")
-        self.fit_chk.setChecked(True)
-        self.fit_chk.toggled.connect(lambda _=False: self._rebuild_and_refresh())
-        bar_l.addWidget(self.fit_chk)
+        # Manual image size. "Fit" scales big images to one page; the percent
+        # options let the user shrink images by hand when Fit isn't enough.
+        bar_l.addWidget(QLabel("Image size:"))
+        self.imgsize_combo = QComboBox()
+        self.imgsize_combo.addItems(
+            ["Fit to page", "100%", "75%", "50%", "35%", "25%"]
+        )
+        self.imgsize_combo.currentIndexChanged.connect(
+            lambda _=0: self._rebuild_and_refresh()
+        )
+        bar_l.addWidget(self.imgsize_combo)
 
         zoom_out = QPushButton("－")
         zoom_in = QPushButton("＋")
@@ -366,12 +370,28 @@ class _PrintPreviewDialog(QDialog):
         return w_in * 96.0, h_in * 96.0
 
     def _build_body_html(self):
-        """Return body HTML with each <img> sized to fit the page when the
-        'Fit images to page' option is on; otherwise capped to page width."""
+        """Return body HTML with each <img> sized according to the chosen
+        image-size mode. 'Fit to page' scales large images so the WHOLE image
+        lands on one page (reserving room for the header on page 1); the
+        percent modes let the user shrink images manually."""
         import re
         page_w, page_h = self._printable_size_px()
-        fit = self.fit_chk.isChecked() if hasattr(self, "fit_chk") else True
+        mode = (self.imgsize_combo.currentText()
+                if hasattr(self, "imgsize_combo") else "Fit to page")
         size_map = self._size_map
+
+        # Reserve vertical space so a "fit" image plus the header still fits on
+        # one page. The header (subject + from/to/cc/date + rule) is roughly
+        # 160 logical px; leave a little extra breathing room.
+        header_reserve = 180.0
+        fit_h = max(100.0, page_h - header_reserve)
+
+        manual_pct = None
+        if mode.endswith("%"):
+            try:
+                manual_pct = float(mode.rstrip("%")) / 100.0
+            except ValueError:
+                manual_pct = None
 
         def _fix(m):
             tag = m.group(0)
@@ -384,10 +404,12 @@ class _PrintPreviewDialog(QDialog):
             style_extra = ""
             if nat and nat[0] > 0 and nat[1] > 0:
                 nw, nh = nat
-                # Scale so width fits the page; if fit-to-page, also cap height.
-                scale = min(1.0, page_w / nw)
-                if fit:
-                    scale = min(scale, page_h / nh)
+                if manual_pct is not None:
+                    # Manual percent, but never wider than the page.
+                    scale = min(manual_pct, page_w / nw)
+                else:
+                    # Fit to page: cap by width AND (page height - header).
+                    scale = min(1.0, page_w / nw, fit_h / nh)
                 tw = max(1, int(nw * scale))
                 th = max(1, int(nh * scale))
                 style_extra = f"width:{tw}px;height:{th}px;"

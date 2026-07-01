@@ -246,12 +246,17 @@ class _PrintPreviewDialog(QDialog):
     correct preview and gives clear Print / Save as PDF / Close buttons.
     """
 
-    def __init__(self, document, printer, default_name: str = "email", parent=None):
+    def __init__(self, header_html, body_html, size_map, printer,
+                 resource_doc=None, default_name: str = "email", parent=None):
         super().__init__(parent)
         from PyQt5.QtPrintSupport import QPrintPreviewWidget
-        self._doc = document
+        self._header_html = header_html
+        self._body_html = body_html
+        self._size_map = size_map or {}
         self._printer = printer
+        self._resource_doc = resource_doc
         self._default_name = default_name
+        self._doc = None  # rebuilt for the current page size
 
         self.setWindowTitle("Print")
         # Size to fit the available screen so the action buttons at the
@@ -294,6 +299,14 @@ class _PrintPreviewDialog(QDialog):
         self.orient_combo.currentIndexChanged.connect(self._on_orient_changed)
         bar_l.addWidget(self.orient_combo)
 
+        # Fit-image-to-page toggle (on by default): scales big posters so the
+        # whole image lands on one page instead of splitting across pages.
+        from PyQt5.QtWidgets import QCheckBox
+        self.fit_chk = QCheckBox("Fit images to page")
+        self.fit_chk.setChecked(True)
+        self.fit_chk.toggled.connect(lambda _=False: self._rebuild_and_refresh())
+        bar_l.addWidget(self.fit_chk)
+
         zoom_out = QPushButton("－")
         zoom_in = QPushButton("＋")
         for b in (zoom_out, zoom_in):
@@ -334,6 +347,96 @@ class _PrintPreviewDialog(QDialog):
         btns_l.addWidget(cancel_btn)
         layout.addWidget(btns)
 
+        # Build the initial document for the current (portrait) page size.
+        self._rebuild_document()
+
+    # ---- document building ----
+    def _printable_size_px(self):
+        """Printable area (width, height) in logical px (96 dpi) for the
+        current printer page + margins. QTextDocument lays out in logical
+        px, so we convert from the printer's physical points."""
+        from PyQt5.QtPrintSupport import QPrinter
+        try:
+            rect = self._printer.pageRect(QPrinter.Point)  # 1/72 inch units
+            w_in = rect.width() / 72.0
+            h_in = rect.height() / 72.0
+        except Exception:
+            # A4 portrait fallback minus ~0.5in margins each side.
+            w_in, h_in = 7.27, 10.69
+        return w_in * 96.0, h_in * 96.0
+
+    def _build_body_html(self):
+        """Return body HTML with each <img> sized to fit the page when the
+        'Fit images to page' option is on; otherwise capped to page width."""
+        import re
+        page_w, page_h = self._printable_size_px()
+        fit = self.fit_chk.isChecked() if hasattr(self, "fit_chk") else True
+        size_map = self._size_map
+
+        def _fix(m):
+            tag = m.group(0)
+            sm = re.search(r'src\s*=\s*["\']([^"\']+)["\']', tag, re.IGNORECASE)
+            src = sm.group(1) if sm else ""
+            nat = size_map.get(src)
+            # Strip existing width/height attrs and any width/height in style.
+            tag = re.sub(r'\s(width|height)\s*=\s*"[^"]*"', "", tag, flags=re.IGNORECASE)
+            tag = re.sub(r"\s(width|height)\s*=\s*'[^']*'", "", tag, flags=re.IGNORECASE)
+            style_extra = ""
+            if nat and nat[0] > 0 and nat[1] > 0:
+                nw, nh = nat
+                # Scale so width fits the page; if fit-to-page, also cap height.
+                scale = min(1.0, page_w / nw)
+                if fit:
+                    scale = min(scale, page_h / nh)
+                tw = max(1, int(nw * scale))
+                th = max(1, int(nh * scale))
+                style_extra = f"width:{tw}px;height:{th}px;"
+            else:
+                style_extra = "max-width:100%;height:auto;"
+            sstyle = re.search(r'style\s*=\s*"([^"]*)"', tag, re.IGNORECASE)
+            if sstyle:
+                existing = re.sub(
+                    r'(?:max-)?(?:width|height)\s*:[^;]*;?', "", sstyle.group(1),
+                    flags=re.IGNORECASE,
+                )
+                tag = tag[:sstyle.start(1)] + existing + style_extra + tag[sstyle.end(1):]
+            else:
+                tag = tag[:-1].rstrip() + f' style="{style_extra}">'
+            return tag
+
+        return re.sub(r'<img\b[^>]*>', _fix, self._body_html, flags=re.IGNORECASE)
+
+    def _rebuild_document(self):
+        from PyQt5.QtCore import QSizeF
+        from PyQt5.QtGui import QTextDocument
+        doc = QTextDocument()
+        page_w, page_h = self._printable_size_px()
+        doc.setPageSize(QSizeF(page_w, page_h))
+        # Copy image resources from the source body view so data:/cached
+        # remote images render in the print document too.
+        if self._resource_doc is not None:
+            try:
+                import re
+                from PyQt5.QtCore import QUrl
+                for m in re.finditer(
+                    r'<img\b[^>]*\bsrc\s*=\s*["\']([^"\']+)["\']',
+                    self._body_html, flags=re.IGNORECASE,
+                ):
+                    src = m.group(1)
+                    res = self._resource_doc.resource(
+                        QTextDocument.ImageResource, QUrl(src)
+                    )
+                    if res is not None:
+                        doc.addResource(QTextDocument.ImageResource, QUrl(src), res)
+            except Exception:
+                pass
+        doc.setHtml(self._header_html + self._build_body_html())
+        self._doc = doc
+
+    def _rebuild_and_refresh(self):
+        self._rebuild_document()
+        self.preview.updatePreview()
+
     def _populate_printers(self):
         from PyQt5.QtPrintSupport import QPrinterInfo
         self.printer_combo.clear()
@@ -352,7 +455,7 @@ class _PrintPreviewDialog(QDialog):
         name = self.printer_combo.currentText()
         if name and name != "(no printers)":
             self._printer.setPrinterName(name)
-            self.preview.updatePreview()
+            self._rebuild_and_refresh()
 
     def _on_orient_changed(self, _idx):
         from PyQt5.QtPrintSupport import QPrinter
@@ -360,14 +463,17 @@ class _PrintPreviewDialog(QDialog):
         self._printer.setOrientation(
             QPrinter.Landscape if landscape else QPrinter.Portrait
         )
-        self.preview.updatePreview()
+        # Page size changed → rebuild so images re-scale to the new page.
+        self._rebuild_and_refresh()
 
     def _render(self, printer):
-        self._doc.print_(printer)
+        if self._doc is not None:
+            self._doc.print_(printer)
 
     def _do_print(self):
         # Render to the selected printer and close.
-        self._doc.print_(self._printer)
+        if self._doc is not None:
+            self._doc.print_(self._printer)
         self.accept()
 
     def _save_pdf(self):
@@ -381,8 +487,11 @@ class _PrintPreviewDialog(QDialog):
         from PyQt5.QtPrintSupport import QPrinter as _QPrinter
         pdf = _QPrinter(_QPrinter.HighResolution)
         pdf.setOutputFormat(_QPrinter.PdfFormat)
+        if self.orient_combo.currentText() == "Landscape":
+            pdf.setOrientation(_QPrinter.Landscape)
         pdf.setOutputFileName(path)
-        self._doc.print_(pdf)
+        if self._doc is not None:
+            self._doc.print_(pdf)
         QMessageBox.information(self, "Saved", f"Saved PDF to:\n{path}")
         self.accept()
 
@@ -749,36 +858,36 @@ class EmailView(QWidget):
         self.img_banner.setVisible(False)
         self.body_view.reload_with_images()
 
-    @staticmethod
-    def _constrain_print_images(html: str) -> str:
-        """Make images fit the printable page width so they don't overflow
-        the paper edge or split across pages. We inject a max-width:100% +
-        height:auto style and strip any fixed width/height larger than the
-        page, preserving aspect ratio."""
+    def _collect_image_sizes(self, html: str) -> dict:
+        """Return {img_src: (width_px, height_px)} for every <img> in the
+        body, using the body view's loaded resources (so we get the real
+        decoded pixel size, including inlined data: URIs and downloaded
+        remote images). Used by the print dialog to scale each image so it
+        fits on a single page."""
         import re
+        from PyQt5.QtCore import QUrl
+        from PyQt5.QtGui import QTextDocument, QImage, QPixmap
+        out = {}
         if not html:
-            return html
-
-        def _fix(m):
-            tag = m.group(0)
-            # Drop explicit width/height attributes (they force oversize).
-            tag = re.sub(r'\s(width|height)\s*=\s*"[^"]*"', "", tag, flags=re.IGNORECASE)
-            tag = re.sub(r"\s(width|height)\s*=\s*'[^']*'", "", tag, flags=re.IGNORECASE)
-            # Ensure a style that caps the rendered size to the page width.
-            style = "max-width:100%;height:auto;"
-            sm = re.search(r'style\s*=\s*"([^"]*)"', tag, flags=re.IGNORECASE)
-            if sm:
-                # Remove any hard width/height in the existing style, then append.
-                existing = re.sub(
-                    r'(?:max-)?(?:width|height)\s*:[^;]*;?', "", sm.group(1),
-                    flags=re.IGNORECASE,
-                )
-                tag = tag[:sm.start(1)] + existing + style + tag[sm.end(1):]
-            else:
-                tag = tag[:-1].rstrip() + f' style="{style}">'
-            return tag
-
-        return re.sub(r'<img\b[^>]*>', _fix, html, flags=re.IGNORECASE)
+            return out
+        doc = self.body_view.document()
+        for m in re.finditer(r'<img\b[^>]*\bsrc\s*=\s*["\']([^"\']+)["\']',
+                             html, flags=re.IGNORECASE):
+            src = m.group(1)
+            if src in out:
+                continue
+            try:
+                res = doc.resource(QTextDocument.ImageResource, QUrl(src))
+                img = None
+                if isinstance(res, QImage):
+                    img = res
+                elif isinstance(res, QPixmap):
+                    img = res.toImage()
+                if img is not None and not img.isNull():
+                    out[src] = (img.width(), img.height())
+            except Exception:
+                pass
+        return out
 
     def _print_email(self):
         """Open the system print dialog (with preview) for the current email.
@@ -814,10 +923,10 @@ class EmailView(QWidget):
         # the body view so the printout matches what the user sees (signature,
         # formatting, inlined images included).
         body_html = self.body_view.toHtml()
-        # Constrain images so they never overflow the page width (which made
-        # banners spill past the paper edge / split awkwardly). max-width:100%
-        # + height:auto keeps aspect ratio while fitting the printable width.
-        body_html = self._constrain_print_images(body_html)
+        # Measure every image's natural size so the print dialog can scale
+        # each one to fit a single page (both width AND height). Width-only
+        # constraints made tall/large posters spill onto a second page.
+        size_map = self._collect_image_sizes(body_html)
 
         def _row(label, value):
             if not value:
@@ -845,24 +954,20 @@ class EmailView(QWidget):
             '</div>'
         )
 
-        doc = QTextDocument()
-        # Embed the body inside the header wrapper. We strip the body's own
-        # <html>/<body> wrapper isn't necessary — QTextDocument handles a
-        # full HTML string, and concatenating the header in front renders
-        # both sections in order.
-        doc.setHtml(header_html + body_html)
-
         printer = QPrinter(QPrinter.HighResolution)
         printer.setDocName(subject)
 
         # Use our own preview dialog (Qt-rendered preview + clear Print /
-        # Save as PDF buttons). The native Windows print dialog's preview
-        # pane shows "This app doesn't support print preview" because Qt
-        # doesn't implement the callback it wants — so we avoid it entirely.
+        # Save as PDF buttons). It rebuilds the document for the current page
+        # size so images are scaled to fit one page in either orientation.
         safe_name = "".join(
             c for c in subject if c.isalnum() or c in " -_"
         ).strip()[:60] or "email"
-        dlg = _PrintPreviewDialog(doc, printer, default_name=safe_name, parent=self)
+        dlg = _PrintPreviewDialog(
+            header_html, body_html, size_map, printer,
+            resource_doc=self.body_view.document(),
+            default_name=safe_name, parent=self,
+        )
         dlg.exec_()
 
     @staticmethod

@@ -34,32 +34,51 @@ from .mail_parser import parse_message
 _FOLDER_MAP = {
     "inbox": "inbox",
     "inbox/": "inbox",
+    "kotak masuk": "inbox",          # Indonesian
     "sent": "sent",
     "sent items": "sent",
     "sent mail": "sent",
     "sent messages": "sent",
+    "[gmail]/sent mail": "sent",
+    "item terkirim": "sent",         # Indonesian
+    "terkirim": "sent",              # Indonesian
     "outbox": "outbox",
+    "kotak keluar": "outbox",        # Indonesian
     "drafts": "drafts",
     "draft": "drafts",
+    "konsep": "drafts",              # Indonesian
     "junk": "spam",
     "junk e-mail": "spam",
+    "junk email": "spam",
     "spam": "spam",
     "bulk mail": "spam",
     "deleted": "trash",
     "deleted items": "trash",
+    "deleted messages": "trash",
     "trash": "trash",
     "bin": "trash",
+    "sampah": "trash",               # Indonesian
+    "item terhapus": "trash",        # Indonesian
 }
 
 
 def map_folder(name: str, default: str = "inbox") -> str:
-    """Best-effort map an arbitrary source folder name to a RunLab folder id."""
-    key = (name or "").strip().lower().strip("/\\")
-    if key in _FOLDER_MAP:
-        return _FOLDER_MAP[key]
-    # Partial matches (e.g. "Karina - Sent Items")
+    """Best-effort map an arbitrary source folder name to a RunLab folder id.
+
+    Handles nested paths ("Personal\\Sent Items"), localized names, and
+    common variants. We check the LAST path segment first (the actual folder
+    name), then fall back to substring matching across the whole path.
+    """
+    raw = (name or "").strip().lower()
+    # Take the final path segment for nested folder names.
+    last = re.split(r"[\\/]+", raw)[-1].strip() if raw else ""
+    for key in (last, raw):
+        if key in _FOLDER_MAP:
+            return _FOLDER_MAP[key]
+    # Substring / token matches (e.g. "Karina - Sent Items", localized names).
+    hay = last or raw
     for token, folder in _FOLDER_MAP.items():
-        if token and token in key:
+        if token and token in hay:
             return folder
     return default
 
@@ -75,13 +94,24 @@ def _synth_uidl(parsed: dict, raw: bytes) -> str:
     return "imp:sha:" + hashlib.sha256(raw).hexdigest()[:32]
 
 
-def _store_raw_email(account_id: int, folder: str, raw: bytes) -> bool:
+def _store_raw_email(account_id: int, folder: str, raw: bytes,
+                     fallback_date_iso: str | None = None) -> bool:
     """Parse one raw RFC822 message and insert it. Returns True if inserted,
-    False if skipped (duplicate or parse failure)."""
+    False if skipped (duplicate or parse failure).
+
+    `fallback_date_iso` is used when the message has no parseable Date header
+    (common with Outlook items) so the row keeps the ORIGINAL message time
+    instead of defaulting to the import time.
+    """
     try:
         parsed, attachments = parse_message(raw)
     except Exception:
         return False
+    # If the MIME had no Date header, parse_message defaulted date_received to
+    # "now". Replace that with the source's real timestamp when we have one.
+    if fallback_date_iso and not parsed.get("date_sent"):
+        parsed["date_sent"] = fallback_date_iso
+        parsed["date_received"] = fallback_date_iso
     uidl = _synth_uidl(parsed, raw)
     parsed["uidl"] = uidl
     if database.email_exists(account_id, folder, uidl):
@@ -270,10 +300,12 @@ def import_pst_via_outlook(account_id: int, pst_path: str, progress_cb=None) -> 
                 try:
                     item = items.Item(idx)
                     raw = _outlook_item_to_eml(item)
+                    item_date = _outlook_item_date(item)
                 except Exception:
                     raw = None
+                    item_date = None
                 done += 1
-                if raw and _store_raw_email(account_id, target, raw):
+                if raw and _store_raw_email(account_id, target, raw, item_date):
                     added += 1
                     per_folder[target] = per_folder.get(target, 0) + 1
                 else:
@@ -309,6 +341,33 @@ def _safe_count(folder) -> int:
         return folder.Items.Count
     except Exception:
         return 0
+
+
+def _outlook_item_date(item) -> str | None:
+    """Return an item's original timestamp as a UTC ISO string.
+
+    Prefers SentOn (when it was sent), then ReceivedTime, then
+    CreationTime. Used as a fallback so imported mail keeps its real date
+    instead of the import time when the exported MIME lacks a Date header.
+    """
+    from datetime import timezone as _tz
+    import datetime as _dt
+    for attr in ("SentOn", "ReceivedTime", "CreationTime"):
+        try:
+            val = getattr(item, attr, None)
+            if not val:
+                continue
+            if isinstance(val, _dt.datetime):
+                dt = val
+            else:
+                # pywintypes time → parse via its float timestamp.
+                dt = _dt.datetime.fromtimestamp(float(val), tz=_tz.utc)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_tz.utc)
+            return dt.astimezone(_tz.utc).isoformat()
+        except Exception:
+            continue
+    return None
 
 
 def _outlook_item_to_eml(item) -> bytes | None:

@@ -41,7 +41,16 @@ def parse_message(raw_bytes: bytes, uidl: str = None) -> dict:
     date_hdr = msg.get("Date")
     if date_hdr:
         try:
-            parsed["date_sent"] = parsedate_to_datetime(date_hdr).isoformat()
+            dt = parsedate_to_datetime(date_hdr)
+            # Normalize to UTC so ISO strings sort chronologically as text.
+            # Without this, messages with different timezone offsets (e.g.
+            # +07:00 vs +00:00) sort by wall-clock text, not real instant —
+            # so a 16:00 mail could appear below a 13:00 one. Naive datetimes
+            # (no tz in the header) are assumed to already be UTC.
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.astimezone(timezone.utc)
+            parsed["date_sent"] = dt.isoformat()
             # Use sent date as received date for sorting consistency
             parsed["date_received"] = parsed["date_sent"]
         except Exception:

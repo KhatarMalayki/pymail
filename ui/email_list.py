@@ -36,6 +36,7 @@ ROLE_THREAD_ROLE = Qt.UserRole + 8   # "head" | "child" | None
 ROLE_THREAD_COUNT = Qt.UserRole + 9  # number of messages in the thread (head)
 ROLE_THREAD_EXPANDED = Qt.UserRole + 10  # bool, head only
 ROLE_THREAD_KEY = Qt.UserRole + 11   # root id grouping head + children
+ROLE_FLAGGED = Qt.UserRole + 12      # bool — Outlook-style follow-up flag
 
 
 # Density presets for the email list. Each controls row height, avatar size,
@@ -212,6 +213,14 @@ class EmailItemDelegate(QStyledItemDelegate):
         date_rect = QRect(rect.right() - self.RIGHT_PAD - date_w,
                           rect.top() + d["sender_y"], date_w, 16)
         painter.drawText(date_rect, Qt.AlignRight | Qt.AlignVCenter, date_str)
+
+        # Follow-up flag indicator (Outlook-style) just under the date.
+        if bool(index.data(ROLE_FLAGGED)):
+            painter.setFont(QFont("Segoe UI Symbol", 10))
+            painter.setPen(QPen(QColor("#d13438")))  # red flag
+            flag_rect = QRect(rect.right() - self.RIGHT_PAD - 18,
+                              rect.top() + d["sender_y"] + 18, 18, 16)
+            painter.drawText(flag_rect, Qt.AlignRight | Qt.AlignVCenter, "\U0001F6A9")
 
         # Sender
         f_sender = QFont("Segoe UI", 10)
@@ -422,6 +431,7 @@ class EmailListWidget(QListWidget):
         item.setData(ROLE_THREAD_COUNT, email.get("_thread_count"))
         item.setData(ROLE_THREAD_KEY, email.get("_thread_key"))
         item.setData(ROLE_THREAD_EXPANDED, bool(email.get("_thread_expanded")))
+        item.setData(ROLE_FLAGGED, bool(email.get("is_flagged")))
         self.addItem(item)
         return item
 
@@ -436,6 +446,15 @@ class EmailListWidget(QListWidget):
         if item:
             item.setData(ROLE_UNREAD, False)
             self.update(self.indexFromItem(item))
+
+    def set_flagged_visual(self, email_id, flagged: bool):
+        """Update the flag indicator for the row with this email_id."""
+        for r in range(self.count()):
+            it = self.item(r)
+            if it is not None and it.data(ROLE_EMAIL_ID) == email_id:
+                it.setData(ROLE_FLAGGED, bool(flagged))
+                self.update(self.indexFromItem(it))
+                break
 
     # ---------- Threading: expand / collapse ----------
     def reset_threads(self, folder: str):
@@ -516,4 +535,5 @@ class EmailListWidget(QListWidget):
         item.setData(ROLE_HAS_ATTACH, bool(email.get("has_attachments")))
         item.setData(ROLE_THREAD_ROLE, email.get("_thread_role"))
         item.setData(ROLE_THREAD_KEY, email.get("_thread_key"))
+        item.setData(ROLE_FLAGGED, bool(email.get("is_flagged")))
         return item

@@ -26,7 +26,7 @@ from .update_dialog import UpdateDialog
 from .banner import NotificationBanner
 from .license_dialog import LicenseInfoDialog
 from .about_dialog import AboutDialog
-from .email_list import EmailListWidget, ROLE_EMAIL_ID, ROLE_UNREAD
+from .email_list import EmailListWidget, ROLE_EMAIL_ID, ROLE_UNREAD, ROLE_FLAGGED
 from .view_bar import ViewBar
 
 
@@ -794,6 +794,9 @@ class MainWindow(QMainWindow):
                 # Mark has_attachments if any in the thread has them
                 if any(it.get("has_attachments") for it in items):
                     head["has_attachments"] = 1
+                # Show a flag on the head if any message in the thread is flagged
+                if any(it.get("is_flagged") for it in items):
+                    head["is_flagged"] = 1
                 # Threading metadata for the list widget / delegate.
                 head["_thread_role"] = "head"
                 head["_thread_count"] = count
@@ -935,6 +938,16 @@ class MainWindow(QMainWindow):
 
         menu.addAction("Mark as read", lambda: self._mark_read(email_id, True))
         menu.addAction("Mark as unread", lambda: self._mark_read(email_id, False))
+        menu.addAction("Mark all as read", self._mark_all_read)
+        menu.addSeparator()
+        # Follow-up flag (Outlook-style). Toggle based on current state.
+        is_flagged = bool(item.data(ROLE_FLAGGED))
+        if is_flagged:
+            menu.addAction("⚑  Clear flag",
+                           lambda: self._set_flag(email_id, False))
+        else:
+            menu.addAction("🚩  Flag for follow-up",
+                           lambda: self._set_flag(email_id, True))
         menu.addSeparator()
         if self.current_folder == "spam":
             menu.addAction("Not junk (move to Inbox)",
@@ -1018,6 +1031,21 @@ class MainWindow(QMainWindow):
         database.mark_read(email_id, read)
         self._refresh_email_list()
         self._update_folder_counts()
+
+    def _set_flag(self, email_id, flagged):
+        database.set_flagged(email_id, flagged)
+        # Instant visual update without a full reload.
+        self.email_list.set_flagged_visual(email_id, flagged)
+
+    def _mark_all_read(self):
+        if self.current_account_id is None:
+            return
+        n = database.mark_all_read(
+            self.current_account_id, self.current_folder, True
+        )
+        self._refresh_email_list()
+        self._update_folder_counts()
+        self.status_label.setText(f"Marked {n} message(s) as read.")
 
     def _trash_email(self, email_id):
         # If email came from IMAP Junk, move-to-trash is effectively a server

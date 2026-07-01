@@ -131,7 +131,13 @@ CREATE TRIGGER IF NOT EXISTS emails_ad AFTER DELETE ON emails BEGIN
     INSERT INTO emails_fts(emails_fts, rowid, subject, sender, body_plain)
     VALUES ('delete', old.id, old.subject, old.sender, old.body_plain);
 END;
-CREATE TRIGGER IF NOT EXISTS emails_au AFTER UPDATE ON emails BEGIN
+-- Only re-index when an FTS-indexed column actually changes. Restricting the
+-- trigger with UPDATE OF means routine flag/read/folder updates do NOT touch
+-- the FTS index — that both speeds them up and stops a corrupt-FTS error from
+-- rolling back a simple "mark as read" (which made read emails pop back to
+-- unread after a refresh).
+CREATE TRIGGER IF NOT EXISTS emails_au
+AFTER UPDATE OF subject, sender, body_plain ON emails BEGIN
     INSERT INTO emails_fts(emails_fts, rowid, subject, sender, body_plain)
     VALUES ('delete', old.id, old.subject, old.sender, old.body_plain);
     INSERT INTO emails_fts(rowid, subject, sender, body_plain)
@@ -192,6 +198,21 @@ def _migrate(conn):
         conn.execute("ALTER TABLE emails ADD COLUMN in_reply_to TEXT")
     if "references_hdr" not in email_cols:
         conn.execute("ALTER TABLE emails ADD COLUMN references_hdr TEXT")
+
+    # Flag / follow-up marker (Outlook-style). 0 = none, 1 = flagged.
+    if "is_flagged" not in email_cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN is_flagged INTEGER DEFAULT 0")
+
+    # Recreate the FTS update trigger so it only fires when an indexed column
+    # changes. Older DBs shipped a trigger that fired on ANY column update,
+    # so a corrupt FTS index could roll back a plain "mark as read"/flag
+    # update — making read mail appear unread again. Dropping it lets the
+    # narrower "UPDATE OF subject, sender, body_plain" trigger in FTS_SCHEMA
+    # take over.
+    try:
+        conn.execute("DROP TRIGGER IF EXISTS emails_au")
+    except Exception:
+        pass
 
 
 def _migrate_blobs_to_store(conn, batch_size: int=25):
@@ -690,7 +711,7 @@ def list_emails(account_id: int, folder: str, search: str="",
                 sql = (
                     "SELECT id, message_id, in_reply_to, references_hdr, "
                     "sender, recipients, subject, date_received, "
-                    "is_read, has_attachments, raw_size, "
+                    "is_read, is_flagged, has_attachments, raw_size, "
                     "substr(coalesce(body_plain,''),1,200) AS preview "
                     "FROM emails "
                     f"WHERE account_id=? AND folder=? AND id IN ({placeholders}) "
@@ -706,7 +727,7 @@ def list_emails(account_id: int, folder: str, search: str="",
             sql = (
                 "SELECT id, message_id, in_reply_to, references_hdr, "
                 "sender, recipients, subject, date_received, "
-                "is_read, has_attachments, raw_size, "
+                "is_read, is_flagged, has_attachments, raw_size, "
                 "substr(coalesce(body_plain,''),1,200) AS preview "
                 "FROM emails "
                 "WHERE account_id=? AND folder=? "
@@ -724,7 +745,7 @@ def list_emails(account_id: int, folder: str, search: str="",
         sql = (
             "SELECT id, message_id, in_reply_to, references_hdr, "
             "sender, recipients, subject, date_received, "
-            "is_read, has_attachments, raw_size, "
+            "is_read, is_flagged, has_attachments, raw_size, "
             "substr(coalesce(body_plain,''),1,200) AS preview "
             "FROM emails "
             "WHERE account_id=? AND folder=? "
@@ -1076,6 +1097,25 @@ def mark_read(email_id: int, read: bool=True):
     _exec_with_fts_repair(
         "UPDATE emails SET is_read=? WHERE id=?",
         (1 if read else 0, email_id),
+    )
+
+
+def mark_all_read(account_id: int, folder: str, read: bool=True):
+    """Mark every message in a folder read/unread in one statement.
+    Returns the number of rows changed."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE emails SET is_read=? WHERE account_id=? AND folder=? "
+            "AND is_read=?",
+            (1 if read else 0, account_id, folder, 0 if read else 1),
+        )
+        return cur.rowcount
+
+
+def set_flagged(email_id: int, flagged: bool=True):
+    _exec_with_fts_repair(
+        "UPDATE emails SET is_flagged=? WHERE id=?",
+        (1 if flagged else 0, email_id),
     )
 
 

@@ -311,6 +311,12 @@ class _PrintPreviewDialog(QDialog):
         )
         bar_l.addWidget(self.imgsize_combo)
 
+        bar_l.addWidget(QLabel("Margins:"))
+        self.margin_combo = QComboBox()
+        self.margin_combo.addItems(["Normal", "Narrow", "None"])
+        self.margin_combo.currentIndexChanged.connect(self._on_margins_changed)
+        bar_l.addWidget(self.margin_combo)
+
         zoom_out = QPushButton("－")
         zoom_in = QPushButton("＋")
         for b in (zoom_out, zoom_in):
@@ -352,6 +358,7 @@ class _PrintPreviewDialog(QDialog):
         layout.addWidget(btns)
 
         # Build the initial document for the current (portrait) page size.
+        self._apply_margins()
         self._rebuild_document()
 
     # ---- document building ----
@@ -401,7 +408,7 @@ class _PrintPreviewDialog(QDialog):
             # Strip existing width/height attrs and any width/height in style.
             tag = re.sub(r'\s(width|height)\s*=\s*"[^"]*"', "", tag, flags=re.IGNORECASE)
             tag = re.sub(r"\s(width|height)\s*=\s*'[^']*'", "", tag, flags=re.IGNORECASE)
-            style_extra = ""
+            tw = th = None
             if nat and nat[0] > 0 and nat[1] > 0:
                 nw, nh = nat
                 if manual_pct is not None:
@@ -412,18 +419,19 @@ class _PrintPreviewDialog(QDialog):
                     scale = min(1.0, page_w / nw, fit_h / nh)
                 tw = max(1, int(nw * scale))
                 th = max(1, int(nh * scale))
-                style_extra = f"width:{tw}px;height:{th}px;"
-            else:
-                style_extra = "max-width:100%;height:auto;"
+            # Remove any width/height already in the style attribute.
             sstyle = re.search(r'style\s*=\s*"([^"]*)"', tag, re.IGNORECASE)
             if sstyle:
-                existing = re.sub(
+                cleaned = re.sub(
                     r'(?:max-)?(?:width|height)\s*:[^;]*;?', "", sstyle.group(1),
                     flags=re.IGNORECASE,
                 )
-                tag = tag[:sstyle.start(1)] + existing + style_extra + tag[sstyle.end(1):]
-            else:
-                tag = tag[:-1].rstrip() + f' style="{style_extra}">'
+                tag = tag[:sstyle.start(1)] + cleaned + tag[sstyle.end(1):]
+            # QTextDocument honors explicit width/height ATTRIBUTES on <img>
+            # (it ignores CSS max-width), so set them directly. This is what
+            # makes the manual percent / fit actually resize the image.
+            if tw and th:
+                tag = tag[:-1].rstrip() + f' width="{tw}" height="{th}">'
             return tag
 
         return re.sub(r'<img\b[^>]*>', _fix, self._body_html, flags=re.IGNORECASE)
@@ -486,6 +494,24 @@ class _PrintPreviewDialog(QDialog):
             QPrinter.Landscape if landscape else QPrinter.Portrait
         )
         # Page size changed → rebuild so images re-scale to the new page.
+        self._rebuild_and_refresh()
+
+    def _apply_margins(self):
+        """Apply the chosen page margins to the printer (in millimetres)."""
+        from PyQt5.QtPrintSupport import QPrinter
+        choice = (self.margin_combo.currentText()
+                  if hasattr(self, "margin_combo") else "Normal")
+        mm = {"Normal": 12.0, "Narrow": 6.0, "None": 0.0}.get(choice, 12.0)
+        try:
+            self._printer.setPageMargins(
+                mm, mm, mm, mm, QPrinter.Millimeter
+            )
+        except Exception:
+            pass
+
+    def _on_margins_changed(self, _idx):
+        self._apply_margins()
+        # Margins change the printable area → rebuild so fit/scale recompute.
         self._rebuild_and_refresh()
 
     def _render(self, printer):
@@ -882,33 +908,54 @@ class EmailView(QWidget):
 
     def _collect_image_sizes(self, html: str) -> dict:
         """Return {img_src: (width_px, height_px)} for every <img> in the
-        body, using the body view's loaded resources (so we get the real
-        decoded pixel size, including inlined data: URIs and downloaded
-        remote images). Used by the print dialog to scale each image so it
-        fits on a single page."""
+        body. Handles inline data: URIs (decoded directly), cached remote
+        images, and document resources. The print dialog needs real pixel
+        sizes because QTextDocument only honors explicit width/height on
+        <img> — it ignores max-width — so without measured sizes the manual
+        scale/percent has nothing to apply."""
         import re
-        from PyQt5.QtCore import QUrl
+        import base64
+        from PyQt5.QtCore import QUrl, QByteArray, QBuffer
         from PyQt5.QtGui import QTextDocument, QImage, QPixmap
         out = {}
         if not html:
             return out
         doc = self.body_view.document()
+        cache = getattr(self.body_view, "_image_cache", {}) or {}
         for m in re.finditer(r'<img\b[^>]*\bsrc\s*=\s*["\']([^"\']+)["\']',
                              html, flags=re.IGNORECASE):
             src = m.group(1)
             if src in out:
                 continue
+            w = h = 0
             try:
-                res = doc.resource(QTextDocument.ImageResource, QUrl(src))
-                img = None
-                if isinstance(res, QImage):
-                    img = res
-                elif isinstance(res, QPixmap):
-                    img = res.toImage()
-                if img is not None and not img.isNull():
-                    out[src] = (img.width(), img.height())
+                if src.lower().startswith("data:"):
+                    # data:[<mime>][;base64],<payload>
+                    header, _, payload = src.partition(",")
+                    raw = (base64.b64decode(payload)
+                           if "base64" in header.lower()
+                           else payload.encode("latin-1", "ignore"))
+                    img = QImage()
+                    img.loadFromData(QByteArray(raw))
+                    if not img.isNull():
+                        w, h = img.width(), img.height()
+                else:
+                    res = None
+                    if src in cache:
+                        res = cache[src]
+                    if res is None:
+                        res = doc.resource(QTextDocument.ImageResource, QUrl(src))
+                    img = None
+                    if isinstance(res, QImage):
+                        img = res
+                    elif isinstance(res, QPixmap):
+                        img = res.toImage()
+                    if img is not None and not img.isNull():
+                        w, h = img.width(), img.height()
             except Exception:
-                pass
+                w = h = 0
+            if w > 0 and h > 0:
+                out[src] = (w, h)
         return out
 
     def _print_email(self):

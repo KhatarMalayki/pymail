@@ -605,13 +605,22 @@ class MainWindow(QMainWindow):
         if not item:
             return
         data = item.data(0, Qt.UserRole)
-        if not data or data[0] != "account":
+        if not data:
             return
-        acc_id = data[1]
         menu = QMenu(self)
-        menu.addAction("Send / Receive", lambda: self._fetch_account(acc_id))
-        menu.addAction("Edit account...", lambda: self._edit_account(acc_id))
-        menu.addAction("Delete account", lambda: self._delete_account(acc_id))
+        if data[0] == "account":
+            acc_id = data[1]
+            menu.addAction("Send / Receive", lambda: self._fetch_account(acc_id))
+            menu.addAction("Edit account...", lambda: self._edit_account(acc_id))
+            menu.addAction("Delete account", lambda: self._delete_account(acc_id))
+        elif data[0] == "folder":
+            _, acc_id, folder = data
+            menu.addAction(
+                "Mark all as read",
+                lambda: self._mark_all_read_for(acc_id, folder),
+            )
+        else:
+            return
         menu.exec_(self.tree.viewport().mapToGlobal(pos))
 
     # ----- Email list -----
@@ -1049,10 +1058,15 @@ class MainWindow(QMainWindow):
     def _mark_all_read(self):
         if self.current_account_id is None:
             return
-        n = database.mark_all_read(
-            self.current_account_id, self.current_folder, True
-        )
-        self._refresh_email_list()
+        self._mark_all_read_for(self.current_account_id, self.current_folder)
+
+    def _mark_all_read_for(self, account_id, folder):
+        if account_id is None:
+            return
+        n = database.mark_all_read(account_id, folder, True)
+        # Refresh the list only if we're viewing that folder right now.
+        if account_id == self.current_account_id and folder == self.current_folder:
+            self._refresh_email_list()
         self._update_folder_counts()
         self.status_label.setText(f"Marked {n} message(s) as read.")
 

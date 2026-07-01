@@ -24,6 +24,11 @@ admin/licenses_issued.json
 smoke_*.py
 test_*.py
 
+# Ad-hoc diagnostic / scratch scripts (local-only experiments)
+_diag_*.py
+_t_*.py
+test[0-9]*.py
+
 # Worker development artifacts
 worker/node_modules/
 worker/.wrangler/

@@ -1049,8 +1049,7 @@ class EmailView(QWidget):
         if files:
             QMessageBox.information(
                 self, "Email evidence exported",
-                f"Saved to:
-{files[0]}"
+                f"Saved to:\n{files[0]}"
             )
 
     def _print_email(self):

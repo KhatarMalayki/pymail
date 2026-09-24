@@ -40,8 +40,8 @@
     "semantic_hash": "a6813f63090bb9fffff9896523dbeb2c"
   },
   "admin/released_versions.json": {
-    "mtime": 1790221890.2863777,
-    "ast_hash": "818a1c9c368f7d8a3a42d2120890ee41",
+    "mtime": 1790222611.5618694,
+    "ast_hash": "0e94b5e1c3ea3b3edc4d936960ed536b",
     "semantic_hash": ""
   },
   "admin/revoke_license.py": {
@@ -160,8 +160,8 @@
     "semantic_hash": "31696f3d62ba60e85c137fd6e478d92f"
   },
   "core/version.py": {
-    "mtime": 1790221767.0762887,
-    "ast_hash": "a01c2eec3286d69848b5a2434c1aa3ea",
+    "mtime": 1790222429.7221613,
+    "ast_hash": "2ca4fae7c5b7418e6bec0eec1a699d7e",
     "semantic_hash": ""
   },
   "main.py": {
@@ -230,8 +230,8 @@
     "semantic_hash": "19e5754afd33c48cfa7c71c4788d6dfc"
   },
   "ui/email_view.py": {
-    "mtime": 1790219789.1126902,
-    "ast_hash": "dc139dd1bcc27497c23187a3f21df3a0",
+    "mtime": 1790222407.6829689,
+    "ast_hash": "63d7353637dec6e8ef1678471f0e3e91",
     "semantic_hash": ""
   },
   "ui/email_window.py": {

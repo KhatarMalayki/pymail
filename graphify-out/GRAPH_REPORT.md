@@ -1,7 +1,7 @@
 # Graph Report - email_client_app  (2026-09-24)
 
 ## Corpus Check
-- 78 files · ~72,225 words
+- 78 files · ~72,224 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -10,7 +10,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `bac823a2`
+- Built from commit: `7bcfe34d`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -141,8 +141,8 @@ Cohesion: 0.06
 Nodes (56): add_account(), create_category(), delete_account(), delete_category(), delete_draft(), delete_manual_contact(), delete_outbox(), emails_all_have_category() (+48 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.11
-Nodes (11): RunLab Mail (codename PyMail) — version & remote URLs.  Bump __version__ on ev, QTextEdit, Non-intrusive notification banner shown at the top of the window.  Appears bel, Main window with 3-panel Outlook-style layout: [ Folders / Accounts ] [ Email l, # NOTE: this only RECEIVES mail. It deliberately does NOT flush the, _DownloadWorker, QDialog, QThread (+3 more)
+Cohesion: 0.12
+Nodes (8): RunLab Mail (codename PyMail) — version & remote URLs.  Bump __version__ on ev, QTextEdit, _DownloadWorker, QDialog, QThread, Update prompt + download progress dialogs., Show "new version available", let the user install or skip., UpdateDialog
 
 ### Community 4 - "Community 4"
 Cohesion: 0.05
@@ -166,7 +166,7 @@ Nodes (31): admin_delete(), admin_extend(), admin_generate(), admin_headers(), a
 
 ### Community 9 - "Community 9"
 Cohesion: 0.09
-Nodes (17): LicenseError, Exception, NotificationBanner, QFrame, Show the banner with the given message.          Args:             text: Mess, LicenseInfoDialog, License activation dialog. Shown when no valid license exists.  Also includes, Read-only dialog showing the current license info, with an option to     enter/ (+9 more)
+Nodes (19): LicenseError, Exception, NotificationBanner, QFrame, Non-intrusive notification banner shown at the top of the window.  Appears bel, Show the banner with the given message.          Args:             text: Mess, LicenseInfoDialog, License activation dialog. Shown when no valid license exists.  Also includes (+11 more)
 
 ### Community 10 - "Community 10"
 Cohesion: 0.18
@@ -393,8 +393,8 @@ Cohesion: 0.20
 Nodes (9): Architecture, Critical files (DO NOT COMMIT), License management, Local development, Prerequisites, Project layout, Releasing a new version, RunLab Mail (+1 more)
 
 ### Community 84 - "JunkFetchWorker"
-Cohesion: 0.24
-Nodes (3): LicenseCheckWorker, QDialog, SettingsDialog
+Cohesion: 0.22
+Nodes (4): Calls /verify on the Worker to learn the canonical status of a     license_id (, WorkerVerifyWorker, QDialog, SettingsDialog
 
 ### Community 85 - "Project Map — RunLab Mail (`email_client_app`)"
 Cohesion: 0.22
@@ -414,9 +414,9 @@ _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `MainWindow` connect `Community 4` to `Community 0`, `Community 3`, `Community 7`, `Community 9`, `Community 12`, `Community 13`, `Community 15`, `Community 16`, `Community 17`, `Community 21`, `Community 24`, `Community 25`, `Community 27`, `Community 29`, `Community 37`, `Community 39`, `Community 51`, `Community 52`, `CategoryManagerDialog`, `Community 57`, `_exec_with_fts_repair`, `Community 62`, `._tree_menu`, `Community 78`, `Community 79`, `JunkFetchWorker`?**
   _High betweenness centrality (0.175) - this node is a cross-community bridge._
-- **Why does `ComposeDialog` connect `Community 12` to `Community 33`, `Community 35`, `Community 36`, `Community 3`, `init_db`, `Community 6`, `Community 4`, `Community 9`, `Community 37`, `Community 44`, `Community 48`, `Community 16`, `Community 18`, `Community 19`, `JunkFetchWorker`, `Community 57`?**
+- **Why does `ComposeDialog` connect `Community 12` to `Community 33`, `Community 35`, `Community 36`, `Community 4`, `init_db`, `Community 6`, `Community 37`, `Community 9`, `Community 44`, `Community 48`, `Community 16`, `Community 18`, `Community 19`, `JunkFetchWorker`, `Community 57`?**
   _High betweenness centrality (0.140) - this node is a cross-community bridge._
-- **Why does `AccountDialog` connect `Community 21` to `Community 35`, `Community 3`, `Community 4`, `RibbonToolbar`, `Community 9`, `Community 44`, `account_dialog.py`, `JunkFetchWorker`, `_exec_with_fts_repair`, `Community 29`?**
+- **Why does `AccountDialog` connect `Community 21` to `Community 35`, `Community 4`, `RibbonToolbar`, `Community 9`, `Community 44`, `account_dialog.py`, `JunkFetchWorker`, `_exec_with_fts_repair`, `Community 29`?**
   _High betweenness centrality (0.059) - this node is a cross-community bridge._
 - **Are the 22 inferred relationships involving `MainWindow` (e.g. with `JunkUnreadCountTests` and `AboutDialog`) actually correct?**
   _`MainWindow` has 22 INFERRED edges - model-reasoned connections that need verification._

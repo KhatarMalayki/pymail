@@ -30,6 +30,9 @@
  *     Body: {version}          // e.g. "1.2.38"
  *     Effect: sets allowed_version on every active user record.
  *             Clients only auto-update when their allowed_version > current.
+ *     Policy: bulk rollout is an owner-only manual action. Publishing a release
+ *             must never call this endpoint automatically; coding agents and
+ *             automation require an explicit owner instruction for each push.
  *
  * Storage layout in R2 bucket:
  *     users.json            { users: [...] }   - canonical user list
@@ -538,16 +541,13 @@ async function handleAdminUpdateUser(request, env) {
 }
 
 async function handleAdminRebind(request, env) {
-  // Move an existing license to a new device. The admin supplies the new
-  // machine_id_hash (computed on the target device). We re-sign the license
-  // payload bound to the new machine and return a fresh license_key the user
-  // pastes via "Enter / replace license key". The license_id is preserved so
-  // the registry row, expiry, and revocation history stay intact.
+  // Move an existing license to a new device, or make it floating by passing
+  // machine_id="". We re-sign the license and return a fresh key. The
+  // license_id, expiry, and revocation history stay intact.
   const body = await request.json().catch(() => ({}));
   const licenseId = String(body.license_id || "").trim();
   const newMachineId = String(body.machine_id || "").trim();
   if (!licenseId) return json({ error: "license_id required" }, 400);
-  if (!newMachineId) return json({ error: "machine_id required" }, 400);
 
   const data = await loadUsers(env);
   const user = data.users.find((u) => u.license_id === licenseId);
@@ -558,11 +558,12 @@ async function handleAdminRebind(request, env) {
   if (body.hostname !== undefined) user.hostname = String(body.hostname).trim();
   if (body.os_user !== undefined) user.os_user = String(body.os_user).trim();
   user.last_seen = new Date().toISOString();
-  user.note = `re-bound to new device by admin (was ${oldMachineId || "unbound"})`;
+  user.note = newMachineId
+    ? `re-bound to new device by admin (was ${oldMachineId || "unbound"})`
+    : `made floating by admin (was ${oldMachineId || "unbound"})`;
   await saveUsers(env, data);
 
-  // Re-sign the license bound to the NEW machine so validate_license() passes
-  // on the target device.
+  // Empty machine_id_hash is the existing client-side floating convention.
   const payload = {
     license_id: user.license_id,
     name: user.name || "",
@@ -579,6 +580,7 @@ async function handleAdminRebind(request, env) {
     license_key: makeLicenseKey(payload, signature),
     machine_id: newMachineId,
     old_machine_id: oldMachineId,
+    floating: newMachineId === "",
   });
 }
 

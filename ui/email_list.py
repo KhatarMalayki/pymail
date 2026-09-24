@@ -37,6 +37,7 @@ ROLE_THREAD_COUNT = Qt.UserRole + 9  # number of messages in the thread (head)
 ROLE_THREAD_EXPANDED = Qt.UserRole + 10  # bool, head only
 ROLE_THREAD_KEY = Qt.UserRole + 11   # root id grouping head + children
 ROLE_FLAGGED = Qt.UserRole + 12      # bool — Outlook-style follow-up flag
+ROLE_CATEGORIES = Qt.UserRole + 13   # list[{id,name,color}] — local tags
 
 
 # Density presets for the email list. Each controls row height, avatar size,
@@ -250,17 +251,28 @@ class EmailItemDelegate(QStyledItemDelegate):
         painter.setFont(f_subj)
         fm_subj = QFontMetrics(f_subj)
         attach_w = 16 if has_attach else 0
-        subj_w_avail = text_w - attach_w
+        categories = index.data(ROLE_CATEGORIES) or []
+        chip_layout, chip_w = self._category_chip_layout(
+            categories, min(190, max(0, int(text_w * 0.45)))
+        )
+        chips_on_subject = d["preview_y"] is None and chip_w > 0
+        subj_w_avail = text_w - attach_w - (chip_w + 7 if chips_on_subject else 0)
         subject_elided = fm_subj.elidedText(subject, Qt.ElideRight, subj_w_avail)
         subj_color = c_text if is_unread else c_text_subtle
         painter.setPen(QPen(QColor(subj_color)))
         subj_rect = QRect(text_x, rect.top() + d["subject_y"], subj_w_avail, 16)
         painter.drawText(subj_rect, Qt.AlignLeft | Qt.AlignVCenter,
                          subject_elided)
+        if chips_on_subject:
+            self._draw_category_chips(
+                painter, chip_layout,
+                text_x + text_w - attach_w - chip_w,
+                rect.top() + d["subject_y"],
+            )
 
         # Paperclip icon for attachments
         if has_attach:
-            pc_x = text_x + subj_w_avail + 4
+            pc_x = text_x + text_w - attach_w + 4
             pc_rect = QRect(pc_x, rect.top() + d["subject_y"], attach_w, 16)
             painter.setPen(QPen(QColor(c_muted)))
             f_pc = QFont("Segoe UI Symbol", 10)
@@ -270,13 +282,24 @@ class EmailItemDelegate(QStyledItemDelegate):
         # Preview line (only when the preset asks for 3 lines)
         if d["preview_y"] is not None:
             preview = self._clean_preview(index.data(ROLE_PREVIEW) or "")
+            preview_w = text_w
+            if chip_w:
+                preview_w -= chip_w + 7
+                self._draw_category_chips(
+                    painter, chip_layout, text_x + preview_w + 7,
+                    rect.top() + d["preview_y"],
+                )
             if preview:
                 f_prev = QFont("Segoe UI", 9)
                 painter.setFont(f_prev)
                 fm_prev = QFontMetrics(f_prev)
-                preview_elided = fm_prev.elidedText(preview, Qt.ElideRight, text_w)
+                preview_elided = fm_prev.elidedText(
+                    preview, Qt.ElideRight, max(0, preview_w)
+                )
                 painter.setPen(QPen(QColor(c_muted)))
-                prev_rect = QRect(text_x, rect.top() + d["preview_y"], text_w, 16)
+                prev_rect = QRect(
+                    text_x, rect.top() + d["preview_y"], preview_w, 16
+                )
                 painter.drawText(prev_rect, Qt.AlignLeft | Qt.AlignVCenter,
                                  preview_elided)
 
@@ -303,12 +326,29 @@ class EmailItemDelegate(QStyledItemDelegate):
 
         # Paperclip just left of date
         right_limit = date_rect.left() - 6
+        if bool(index.data(ROLE_FLAGGED)):
+            flag_rect = QRect(right_limit - 18, row_y, 18, row_h)
+            painter.setPen(QPen(QColor("#d13438")))
+            painter.setFont(QFont("Segoe UI Symbol", 9))
+            painter.drawText(flag_rect, Qt.AlignRight | Qt.AlignVCenter, "🚩")
+            right_limit -= 20
         if has_attach:
             pc_rect = QRect(right_limit - 16, row_y, 16, row_h)
             painter.setPen(QPen(QColor(c_muted)))
             painter.setFont(QFont("Segoe UI Symbol", 9))
             painter.drawText(pc_rect, Qt.AlignRight | Qt.AlignVCenter, "📎")
             right_limit -= 18
+
+        categories = index.data(ROLE_CATEGORIES) or []
+        chip_layout, chip_w = self._category_chip_layout(
+            categories, min(170, max(0, int((right_limit - text_x) * 0.35)))
+        )
+        if chip_w:
+            self._draw_category_chips(
+                painter, chip_layout, right_limit - chip_w,
+                row_y + (row_h - 16) // 2,
+            )
+            right_limit -= chip_w + 7
 
         # Sender (fixed-width column on the left)
         f_sender = QFont("Segoe UI", 9)
@@ -339,6 +379,56 @@ class EmailItemDelegate(QStyledItemDelegate):
             subj_rect = QRect(subj_x, row_y, subj_w, row_h)
             painter.drawText(subj_rect, Qt.AlignLeft | Qt.AlignVCenter,
                              subject_elided)
+
+    @staticmethod
+    def _category_text_color(color: QColor) -> QColor:
+        luminance = (0.299 * color.red() + 0.587 * color.green()
+                     + 0.114 * color.blue())
+        return QColor("#202020" if luminance > 165 else "#ffffff")
+
+    def _category_chip_layout(self, categories, max_width):
+        if not categories or max_width < 24:
+            return [], 0
+        font = QFont("Segoe UI", 8)
+        metrics = QFontMetrics(font)
+        layout = []
+        used = 0
+        for index, category in enumerate(categories):
+            name = str(category.get("name") or "")
+            width = min(92, metrics.horizontalAdvance(name) + 14)
+            gap = 4 if layout else 0
+            remaining = len(categories) - index - 1
+            overflow_width = metrics.horizontalAdvance(f"+{remaining}") + 12
+            reserve = (4 + overflow_width) if remaining else 0
+            if used + gap + width + reserve > max_width:
+                hidden = len(categories) - index
+                label = f"+{hidden}"
+                extra = metrics.horizontalAdvance(label) + 12
+                if used + (4 if layout else 0) + extra <= max_width:
+                    layout.append((label, "#767676", extra))
+                    used += (4 if used else 0) + extra
+                break
+            layout.append((name, category.get("color") or "#767676", width))
+            used += gap + width
+        return layout, used
+
+    def _draw_category_chips(self, painter, layout, x, y):
+        painter.save()
+        painter.setFont(QFont("Segoe UI", 8))
+        cursor = x
+        for index, (label, color_value, width) in enumerate(layout):
+            if index:
+                cursor += 4
+            color = QColor(color_value)
+            chip = QRect(cursor, y, width, 16)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawRoundedRect(chip, 4, 4)
+            painter.setPen(QPen(self._category_text_color(color)))
+            painter.drawText(chip.adjusted(6, 0, -6, 0),
+                             Qt.AlignLeft | Qt.AlignVCenter, label)
+            cursor += width
+        painter.restore()
 
     @staticmethod
     def _clean_sender(sender: str) -> str:
@@ -376,6 +466,7 @@ class EmailListWidget(QListWidget):
     """Themed email list, ready for the delegate above."""
 
     request_more = pyqtSignal()
+    left_item_pressed = pyqtSignal(QListWidgetItem)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -437,6 +528,7 @@ class EmailListWidget(QListWidget):
         item.setData(ROLE_THREAD_KEY, email.get("_thread_key"))
         item.setData(ROLE_THREAD_EXPANDED, bool(email.get("_thread_expanded")))
         item.setData(ROLE_FLAGGED, bool(email.get("is_flagged")))
+        item.setData(ROLE_CATEGORIES, email.get("categories") or [])
         self.addItem(item)
         return item
 
@@ -508,6 +600,8 @@ class EmailListWidget(QListWidget):
             event.accept()
             return
         super().mousePressEvent(event)
+        if event.button() == Qt.LeftButton and item is not None:
+            self.left_item_pressed.emit(item)
 
     def toggle_thread(self, head_item):
         """Expand or collapse the thread whose head is head_item."""
@@ -557,4 +651,5 @@ class EmailListWidget(QListWidget):
         item.setData(ROLE_THREAD_ROLE, email.get("_thread_role"))
         item.setData(ROLE_THREAD_KEY, email.get("_thread_key"))
         item.setData(ROLE_FLAGGED, bool(email.get("is_flagged")))
+        item.setData(ROLE_CATEGORIES, email.get("categories") or [])
         return item

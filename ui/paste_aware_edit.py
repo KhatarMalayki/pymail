@@ -13,8 +13,10 @@ import re
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from PyQt5.QtCore import Qt, pyqtSignal, QThread, QMimeData, QUrl
-from PyQt5.QtGui import QImage
+from PyQt5.QtCore import (
+    Qt, pyqtSignal, QThread, QMimeData, QUrl, QByteArray, QBuffer, QIODevice,
+)
+from PyQt5.QtGui import QImage, QPixmap, QTextDocument
 from PyQt5.QtWidgets import QTextEdit, QApplication
 
 _DEFAULT_TIMEOUT = 6  # seconds per image
@@ -22,6 +24,65 @@ _MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB cap per image
 _MAX_TOTAL_IMAGES = 20  # don't download more than this in one paste
 _USER_AGENT = "Mozilla/5.0 (RunLabMail; signature paste)"
 _DEFAULT_MAX_IMG_WIDTH = 400  # corporate logos ~300px, banners ~200px
+_SCREENSHOT_MAX_WIDTH = 900  # readable in compose and most desktop mail clients
+
+
+def _clipboard_image_to_data_uri(value) -> tuple[str, QImage] | None:
+    """Encode clipboard image data as a persistent PNG data URI.
+
+    Qt's native QTextEdit paste stores screenshots as transient document
+    resources. Those can display in the editor but disappear after toHtml(),
+    draft persistence, or sending. A data URI survives every one of those
+    boundaries and smtp_client later turns it into a proper CID inline part.
+    """
+    if isinstance(value, QPixmap):
+        image = value.toImage()
+    elif isinstance(value, QImage):
+        image = value.copy()
+    else:
+        return None
+    if image.isNull():
+        return None
+
+    if image.width() > _SCREENSHOT_MAX_WIDTH:
+        image = image.scaledToWidth(
+            _SCREENSHOT_MAX_WIDTH, Qt.TransformationMode.SmoothTransformation
+        )
+
+    payload = QByteArray()
+    buffer = QBuffer(payload)
+    if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+        return None
+    try:
+        if not image.save(buffer, "PNG"):
+            return None
+    finally:
+        buffer.close()
+
+    encoded = bytes(payload.toBase64()).decode("ascii")
+    return f"data:image/png;base64,{encoded}", image
+
+
+def _clipboard_has_editable_html(source: QMimeData) -> bool:
+    """True when HTML should win over an accompanying image preview.
+
+    Office/WPS clipboard payloads commonly expose the same selection as HTML,
+    plain text, and a bitmap preview. Choosing ``hasImage()`` first turns an
+    editable spreadsheet/table into one flat picture. Conversely, copying an
+    image from a browser may expose a tiny ``<img>`` HTML wrapper with no text;
+    that should still use the persistent screenshot/image path.
+    """
+    if not source.hasHtml():
+        return False
+    try:
+        html = source.html() or ""
+        text = source.text() or ""
+    except Exception:
+        return False
+    return bool(
+        text.strip()
+        or re.search(r"<(?:table|tr|td|th)\b", html, re.IGNORECASE)
+    )
 
 
 def _fetch_image(url: str) -> tuple[str, bytes | None, str]:
@@ -449,7 +510,7 @@ class _PasteWorker(QThread):
 
 
 class PasteAwareTextEdit(QTextEdit):
-    """QTextEdit that downloads external images on paste."""
+    """QTextEdit that preserves clipboard screenshots and external images."""
 
     paste_progress = pyqtSignal(int, int)  # downloaded, total
     paste_finished = pyqtSignal(int, int)  # downloaded, failed
@@ -470,6 +531,24 @@ class PasteAwareTextEdit(QTextEdit):
             self.setHtml(new_html)
 
     def insertFromMimeData(self, source: QMimeData):
+        # Snipping Tool / Print Screen generally puts a raw image on the
+        # clipboard, not HTML. Persist it as a data URI instead of relying on
+        # QTextEdit's transient resource name, so drafts and SMTP retain it.
+        if source.hasImage() and not _clipboard_has_editable_html(source):
+            converted = _clipboard_image_to_data_uri(source.imageData())
+            if converted is not None:
+                data_uri, image = converted
+                self.document().addResource(
+                    QTextDocument.ResourceType.ImageResource,
+                    QUrl(data_uri),
+                    image,
+                )
+                self.textCursor().insertHtml(
+                    f'<img src="{data_uri}" width="{image.width()}" '
+                    f'height="{image.height()}" />'
+                )
+                return
+
         if not self._image_download_enabled or not source.hasHtml():
             super().insertFromMimeData(source)
             return

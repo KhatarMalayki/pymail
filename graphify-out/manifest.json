@@ -1,0 +1,397 @@
+{
+  "_gen_tunas_icons.py": {
+    "mtime": 1780905567.422684,
+    "ast_hash": "3f167810757241ec9398bccee78b7f89",
+    "semantic_hash": "3f167810757241ec9398bccee78b7f89"
+  },
+  "admin/__init__.py": {
+    "mtime": 1779470364.4203546,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "admin/bulk_issue.py": {
+    "mtime": 1779555586.9286685,
+    "ast_hash": "c716cc3ef7edee7449e00f72c7df1cad",
+    "semantic_hash": "c716cc3ef7edee7449e00f72c7df1cad"
+  },
+  "admin/cleanup_releases.py": {
+    "mtime": 1779497130.3205445,
+    "ast_hash": "22b918e1a8ab2265aba35e476ab9e4af",
+    "semantic_hash": "22b918e1a8ab2265aba35e476ab9e4af"
+  },
+  "admin/generate_keys.py": {
+    "mtime": 1779470374.8136473,
+    "ast_hash": "1a2ff39abec365eabb746958ded9ad28",
+    "semantic_hash": "1a2ff39abec365eabb746958ded9ad28"
+  },
+  "admin/issue_license.py": {
+    "mtime": 1779602028.0062459,
+    "ast_hash": "788b7157535b510b3beccbe04599dda6",
+    "semantic_hash": "788b7157535b510b3beccbe04599dda6"
+  },
+  "admin/make_multisize_icon.py": {
+    "mtime": 1779509526.036158,
+    "ast_hash": "4cc38506dea1e56a2e1a176eb11d2da2",
+    "semantic_hash": "4cc38506dea1e56a2e1a176eb11d2da2"
+  },
+  "admin/prune_r2.py": {
+    "mtime": 1780152824.2409046,
+    "ast_hash": "a6813f63090bb9fffff9896523dbeb2c",
+    "semantic_hash": "a6813f63090bb9fffff9896523dbeb2c"
+  },
+  "admin/released_versions.json": {
+    "mtime": 1786477680.9685774,
+    "ast_hash": "ae6fbeba6b26ebff267daa0a759b6f7a",
+    "semantic_hash": ""
+  },
+  "admin/revoke_license.py": {
+    "mtime": 1779496430.8371575,
+    "ast_hash": "c4c20762c1bd00f580b60fc11dc75fe4",
+    "semantic_hash": "c4c20762c1bd00f580b60fc11dc75fe4"
+  },
+  "admin/revoked.json": {
+    "mtime": 1779498477.074118,
+    "ast_hash": "4aa76749cf736b5731da2a09215a6957",
+    "semantic_hash": "4aa76749cf736b5731da2a09215a6957"
+  },
+  "build.py": {
+    "mtime": 1785137729.3092875,
+    "ast_hash": "3baed48a06dd1eabea4b4f7026ef6d02",
+    "semantic_hash": ""
+  },
+  "core/__init__.py": {
+    "mtime": 1779464595.8405063,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "core/_tunas_icons.py": {
+    "mtime": 1780905591.6764643,
+    "ast_hash": "89800cf82f284cd5f0b08c22960a35cb",
+    "semantic_hash": "89800cf82f284cd5f0b08c22960a35cb"
+  },
+  "core/attachment_store.py": {
+    "mtime": 1779787039.6977837,
+    "ast_hash": "a54b26a3d1d15980a841bc58ebcc4268",
+    "semantic_hash": "a54b26a3d1d15980a841bc58ebcc4268"
+  },
+  "core/config.py": {
+    "mtime": 1779787648.480782,
+    "ast_hash": "894ea07ac4f9a1cfccb2f7f3265dfd4d",
+    "semantic_hash": "894ea07ac4f9a1cfccb2f7f3265dfd4d"
+  },
+  "core/contacts.py": {
+    "mtime": 1779550908.3224018,
+    "ast_hash": "83d2d117ed191a797ecfedfc426ee3f7",
+    "semantic_hash": "83d2d117ed191a797ecfedfc426ee3f7"
+  },
+  "core/database.py": {
+    "mtime": 1790219087.6570837,
+    "ast_hash": "e95cfce5daa114a05ceed698cfbe88b2",
+    "semantic_hash": ""
+  },
+  "core/imap_client.py": {
+    "mtime": 1790219087.6675909,
+    "ast_hash": "2adc812b94172ba9b01503f767dc1ce4",
+    "semantic_hash": ""
+  },
+  "core/install_location.py": {
+    "mtime": 1779601993.518831,
+    "ast_hash": "e854a5c867b44c81b531e2d506d7be80",
+    "semantic_hash": "e854a5c867b44c81b531e2d506d7be80"
+  },
+  "core/license.py": {
+    "mtime": 1784879403.787572,
+    "ast_hash": "8e84d5aa43cb1f02d4b07f26c7a4ead1",
+    "semantic_hash": ""
+  },
+  "core/license_client.py": {
+    "mtime": 1784886494.121581,
+    "ast_hash": "67037113ec51f053d5ca55182d50a726",
+    "semantic_hash": ""
+  },
+  "core/license_pubkey.py": {
+    "mtime": 1779470376.05295,
+    "ast_hash": "08c1a6bbd13516823caed752c7372b01",
+    "semantic_hash": "08c1a6bbd13516823caed752c7372b01"
+  },
+  "core/mail_import.py": {
+    "mtime": 1790219087.6721785,
+    "ast_hash": "f399fe05a3525efaf7642dfd8b8937db",
+    "semantic_hash": ""
+  },
+  "core/mail_parser.py": {
+    "mtime": 1785137344.3684583,
+    "ast_hash": "4d26832ca11257a3c12197eae054b874",
+    "semantic_hash": ""
+  },
+  "core/pop3_client.py": {
+    "mtime": 1790219087.6629467,
+    "ast_hash": "d5b059575f34352e2733c6a7b3921194",
+    "semantic_hash": ""
+  },
+  "core/recipient_utils.py": {
+    "mtime": 1784270831.9330628,
+    "ast_hash": "bcf3fbde61f21a172df248f45d3b3fb5",
+    "semantic_hash": "bcf3fbde61f21a172df248f45d3b3fb5"
+  },
+  "core/secure_storage.py": {
+    "mtime": 1786444102.7858558,
+    "ast_hash": "d88ff5cad7d07ff943fde80171a160c8",
+    "semantic_hash": ""
+  },
+  "core/sig_templates.py": {
+    "mtime": 1786075426.3560693,
+    "ast_hash": "53163f45bb66d6e39554746e347d8f09",
+    "semantic_hash": ""
+  },
+  "core/single_instance.py": {
+    "mtime": 1779787172.4901311,
+    "ast_hash": "f0d63d74914eb065596f30941298cd45",
+    "semantic_hash": "f0d63d74914eb065596f30941298cd45"
+  },
+  "core/smtp_client.py": {
+    "mtime": 1784714481.8092368,
+    "ast_hash": "44acba9e835afe66d078edc3905c59e6",
+    "semantic_hash": ""
+  },
+  "core/updater.py": {
+    "mtime": 1779964681.9485564,
+    "ast_hash": "31696f3d62ba60e85c137fd6e478d92f",
+    "semantic_hash": "31696f3d62ba60e85c137fd6e478d92f"
+  },
+  "core/version.py": {
+    "mtime": 1786477223.1387746,
+    "ast_hash": "355a70e7cbda0f56374e951df13f1c2f",
+    "semantic_hash": ""
+  },
+  "main.py": {
+    "mtime": 1786440628.1196413,
+    "ast_hash": "9f8090b1b08efa34121db56d573786c4",
+    "semantic_hash": ""
+  },
+  "pymail_update.example.json": {
+    "mtime": 1779742957.1870863,
+    "ast_hash": "f70b9683b1b762082b77878eeb935b16",
+    "semantic_hash": "f70b9683b1b762082b77878eeb935b16"
+  },
+  "release.py": {
+    "mtime": 1788850992.042541,
+    "ast_hash": "0778fbb6f3fb2c1f0e49638e3a870b53",
+    "semantic_hash": ""
+  },
+  "tests/testcategories.py": {
+    "mtime": 1784256306.5314753,
+    "ast_hash": "1c889f7746fdeb0fbb20a817bbf8fb4d",
+    "semantic_hash": "1c889f7746fdeb0fbb20a817bbf8fb4d"
+  },
+  "tests/testreply_all.py": {
+    "mtime": 1784270831.9406168,
+    "ast_hash": "6b96fadcecc896efa415a4eaf53f68df",
+    "semantic_hash": "6b96fadcecc896efa415a4eaf53f68df"
+  },
+  "ui/__init__.py": {
+    "mtime": 1779464596.028932,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "ui/about_dialog.py": {
+    "mtime": 1779742902.4085572,
+    "ast_hash": "ea9705ceef0423df2874e7eaf4c423a2",
+    "semantic_hash": "ea9705ceef0423df2874e7eaf4c423a2"
+  },
+  "ui/account_dialog.py": {
+    "mtime": 1786444102.7902386,
+    "ast_hash": "ee681722dddbb8db8e801c4292ca8416",
+    "semantic_hash": ""
+  },
+  "ui/accounts_list_dialog.py": {
+    "mtime": 1779605156.6099656,
+    "ast_hash": "5c63d630e5a6755b9ef61f7e95b48b6a",
+    "semantic_hash": "5c63d630e5a6755b9ef61f7e95b48b6a"
+  },
+  "ui/banner.py": {
+    "mtime": 1779469952.7837603,
+    "ast_hash": "50ffb8da00fe969b9049396fb4b44340",
+    "semantic_hash": "50ffb8da00fe969b9049396fb4b44340"
+  },
+  "ui/category_dialog.py": {
+    "mtime": 1784256117.9091847,
+    "ast_hash": "8b53f9fc1ab3bcc7ef55285521b12ee8",
+    "semantic_hash": "8b53f9fc1ab3bcc7ef55285521b12ee8"
+  },
+  "ui/compose_dialog.py": {
+    "mtime": 1790219087.6759734,
+    "ast_hash": "23b8fbb268a0ae8335cd09f44ed5d991",
+    "semantic_hash": ""
+  },
+  "ui/email_list.py": {
+    "mtime": 1784279468.7802587,
+    "ast_hash": "19e5754afd33c48cfa7c71c4788d6dfc",
+    "semantic_hash": "19e5754afd33c48cfa7c71c4788d6dfc"
+  },
+  "ui/email_view.py": {
+    "mtime": 1790219789.1126902,
+    "ast_hash": "dc139dd1bcc27497c23187a3f21df3a0",
+    "semantic_hash": ""
+  },
+  "ui/email_window.py": {
+    "mtime": 1783070763.7889628,
+    "ast_hash": "cb9b2b9c40727ac71498ec0522da7d01",
+    "semantic_hash": "cb9b2b9c40727ac71498ec0522da7d01"
+  },
+  "ui/import_dialog.py": {
+    "mtime": 1780753770.3573258,
+    "ast_hash": "ce355f30c9a5632fc983d76e54dae700",
+    "semantic_hash": "ce355f30c9a5632fc983d76e54dae700"
+  },
+  "ui/license_dialog.py": {
+    "mtime": 1780753770.3573258,
+    "ast_hash": "ed22430762e574eff831320e58385b7d",
+    "semantic_hash": "ed22430762e574eff831320e58385b7d"
+  },
+  "ui/license_manager_dialog.py": {
+    "mtime": 1786439505.7444086,
+    "ast_hash": "a5c3aeb6e2ec40f905729db60184dcaf",
+    "semantic_hash": ""
+  },
+  "ui/main_window.py": {
+    "mtime": 1790219776.8105829,
+    "ast_hash": "e6e51c7e0c051537ec6f4b12e44c165a",
+    "semantic_hash": ""
+  },
+  "ui/paste_aware_edit.py": {
+    "mtime": 1785811594.6484272,
+    "ast_hash": "099b3cffb7c0f2a9dbff9b24ab0375c9",
+    "semantic_hash": ""
+  },
+  "ui/recipient_completer.py": {
+    "mtime": 1780753770.3684995,
+    "ast_hash": "ff595f2f3555112f4225dfc388a6eab1",
+    "semantic_hash": "ff595f2f3555112f4225dfc388a6eab1"
+  },
+  "ui/ribbon_toolbar.py": {
+    "mtime": 1780154532.218401,
+    "ast_hash": "05ac26672a149c9cd005e6ace7522253",
+    "semantic_hash": "05ac26672a149c9cd005e6ace7522253"
+  },
+  "ui/settings_dialog.py": {
+    "mtime": 1780753770.3725832,
+    "ast_hash": "c1c4b0a83aa91684e6b453d841d481ca",
+    "semantic_hash": "c1c4b0a83aa91684e6b453d841d481ca"
+  },
+  "ui/sync_progress_dialog.py": {
+    "mtime": 1779601919.9567251,
+    "ast_hash": "a5c26772e252e854657c6a2b0fc2c66c",
+    "semantic_hash": "a5c26772e252e854657c6a2b0fc2c66c"
+  },
+  "ui/template_form_dialog.py": {
+    "mtime": 1786085878.5679548,
+    "ast_hash": "7f76ccef07ebd2bd680039bd33d88c62",
+    "semantic_hash": ""
+  },
+  "ui/theme.py": {
+    "mtime": 1780121841.5553243,
+    "ast_hash": "290b0073f11cfd2f94ad8c6ad728f854",
+    "semantic_hash": "290b0073f11cfd2f94ad8c6ad728f854"
+  },
+  "ui/update_dialog.py": {
+    "mtime": 1779601889.4823098,
+    "ast_hash": "75863e5e058840109ab6e4bcede7c6c9",
+    "semantic_hash": "75863e5e058840109ab6e4bcede7c6c9"
+  },
+  "ui/view_bar.py": {
+    "mtime": 1780140257.985387,
+    "ast_hash": "6a5bdefd65dd2a2ad42ca2d1519a4fe9",
+    "semantic_hash": "6a5bdefd65dd2a2ad42ca2d1519a4fe9"
+  },
+  "update_manifest.example.json": {
+    "mtime": 1779467115.2691512,
+    "ast_hash": "7e018aaa8cd8f0187b0f0e5bece34d31",
+    "semantic_hash": "7e018aaa8cd8f0187b0f0e5bece34d31"
+  },
+  "worker/package.json": {
+    "mtime": 1779557574.593898,
+    "ast_hash": "04154b94f3b1d50ab55a4850e1c49350",
+    "semantic_hash": "04154b94f3b1d50ab55a4850e1c49350"
+  },
+  "worker/src/index.js": {
+    "mtime": 1784886494.1229138,
+    "ast_hash": "0277e0a0312184f1a722dc3701ef6c75",
+    "semantic_hash": ""
+  },
+  "PROJECT_MAP.md": {
+    "mtime": 1784712624.951676,
+    "ast_hash": "806ff3a3fb1254801dd3b434a4335603",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1779602086.3539236,
+    "ast_hash": "52475356b5a1e1c38441878872152d1a",
+    "semantic_hash": ""
+  },
+  "RELEASE_NOTES.md": {
+    "mtime": 1783669399.240984,
+    "ast_hash": "60588546b951f8b59deb8cda8c9d169e",
+    "semantic_hash": ""
+  },
+  "requirements.txt": {
+    "mtime": 1785137344.3708527,
+    "ast_hash": "838181d8f00e9a886d3de0c68dbd6458",
+    "semantic_hash": ""
+  },
+  "worker/README.md": {
+    "mtime": 1779557576.517709,
+    "ast_hash": "4b35231e8f83380c578d580ddda0b381",
+    "semantic_hash": ""
+  },
+  "tests/testjunkcounts.py": {
+    "mtime": 1784885375.806293,
+    "ast_hash": "4aa1969b40ba0f272b6e6f84ac7be4eb",
+    "semantic_hash": ""
+  },
+  "core/_tunas_logistic_logo.py": {
+    "mtime": 1786075345.9683778,
+    "ast_hash": "2d590858cfcd7a4c2207370fd421fabe",
+    "semantic_hash": ""
+  },
+  "core/email_export.py": {
+    "mtime": 1790219731.7103534,
+    "ast_hash": "d18e5d9514aea1c7257ee527642cfe3b",
+    "semantic_hash": ""
+  },
+  "tests/test_email_export.py": {
+    "mtime": 1790219804.3971071,
+    "ast_hash": "e58443d89a84a146c2070e3ed6ddb00d",
+    "semantic_hash": ""
+  },
+  "tests/test_license_machine_id.py": {
+    "mtime": 1784879403.796355,
+    "ast_hash": "26483fffca7f3155caf65d22c1be05a4",
+    "semantic_hash": ""
+  },
+  "tests/test_password_storage.py": {
+    "mtime": 1786444102.7922318,
+    "ast_hash": "0bf1b198bdaa6d6fe0eda98b5b4b2686",
+    "semantic_hash": ""
+  },
+  "tests/test_paste_screenshot.py": {
+    "mtime": 1785811618.4774897,
+    "ast_hash": "c28702782ed523719a28336f461210ff",
+    "semantic_hash": ""
+  },
+  "tests/test_sig_templates.py": {
+    "mtime": 1786085878.581313,
+    "ast_hash": "5bc9c954dc3ef95b44feb9e3af472c3a",
+    "semantic_hash": ""
+  },
+  "tests/test_smtp_link_sanitizer.py": {
+    "mtime": 1784714494.5275974,
+    "ast_hash": "6f5697ce122547fde0e18ab17b69b083",
+    "semantic_hash": ""
+  },
+  "tests/test_tnef_attachments.py": {
+    "mtime": 1785137531.4276128,
+    "ast_hash": "e8a729a85a6fedc37130bc725d8da642",
+    "semantic_hash": ""
+  }
+}

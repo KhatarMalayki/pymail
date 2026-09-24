@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     junk_purge_days INTEGER DEFAULT 0,
     junk_purge_server INTEGER DEFAULT 0,
     junk_purge_last_run TEXT,
+    categories_initialized INTEGER DEFAULT 0,
     created_at      TEXT
 );
 
@@ -61,6 +62,7 @@ CREATE TABLE IF NOT EXISTS emails (
     is_read         INTEGER DEFAULT 0,
     has_attachments INTEGER DEFAULT 0,
     raw_size        INTEGER DEFAULT 0,
+    raw_message     BLOB,
     UNIQUE(account_id, folder, uidl),
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
@@ -100,6 +102,24 @@ CREATE TABLE IF NOT EXISTS contact_cache (
     name        TEXT,
     last_seen   TEXT
 );
+
+CREATE TABLE IF NOT EXISTS categories (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL,
+    name        TEXT NOT NULL COLLATE NOCASE,
+    color       TEXT NOT NULL,
+    sort_order  INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(account_id, name),
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS email_categories (
+    email_id    INTEGER NOT NULL,
+    category_id INTEGER NOT NULL,
+    PRIMARY KEY (email_id, category_id),
+    FOREIGN KEY (email_id) REFERENCES emails(id) ON DELETE CASCADE,
+    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+);
 """
 
 # Indexes are created AFTER schema migrations have run, so legacy DBs
@@ -112,6 +132,10 @@ CREATE INDEX IF NOT EXISTS idx_attachments_email
     ON attachments(email_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_hash
     ON attachments(file_hash);
+CREATE INDEX IF NOT EXISTS idx_categories_account
+    ON categories(account_id, sort_order, name);
+CREATE INDEX IF NOT EXISTS idx_email_categories_category
+    ON email_categories(category_id);
 """
 
 # FTS5 virtual table created separately (uses CREATE VIRTUAL TABLE which
@@ -184,6 +208,11 @@ def _migrate(conn):
         conn.execute("ALTER TABLE accounts ADD COLUMN max_email_bytes INTEGER DEFAULT 0")
     if "send_immediately" not in cols:
         conn.execute("ALTER TABLE accounts ADD COLUMN send_immediately INTEGER DEFAULT 0")
+    if "categories_initialized" not in cols:
+        conn.execute(
+            "ALTER TABLE accounts ADD COLUMN categories_initialized "
+            "INTEGER DEFAULT 0"
+        )
 
     # attachments.file_hash (legacy DBs only had `data` BLOB)
     cur = conn.execute("PRAGMA table_info(attachments)")
@@ -202,6 +231,8 @@ def _migrate(conn):
     # Flag / follow-up marker (Outlook-style). 0 = none, 1 = flagged.
     if "is_flagged" not in email_cols:
         conn.execute("ALTER TABLE emails ADD COLUMN is_flagged INTEGER DEFAULT 0")
+    if "raw_message" not in email_cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN raw_message BLOB")
 
     # Recreate the FTS update trigger so it only fires when an indexed column
     # changes. Older DBs shipped a trigger that fired on ANY column update,
@@ -256,10 +287,17 @@ def _migrate_passwords(conn):
         acc_id = r["id"]
         pop3 = r["pop3_password"]
         smtp = r["smtp_password"]
+        secrets = {}
         if pop3:
-            secure_storage.set_secret(f"pop3_pass_{acc_id}", pop3)
+            secrets[f"pop3_pass_{acc_id}"] = pop3
         if smtp:
-            secure_storage.set_secret(f"smtp_pass_{acc_id}", smtp)
+            secrets[f"smtp_pass_{acc_id}"] = smtp
+        try:
+            secure_storage.set_secrets(secrets)
+        except secure_storage.SecretStorageError:
+            # Never destroy the last usable copy. A later launch retries the
+            # migration after the storage/permission problem is fixed.
+            continue
         conn.execute(
             "UPDATE accounts SET pop3_password='', smtp_password='' WHERE id=?",
             (acc_id,)
@@ -476,10 +514,12 @@ def add_account(data: dict) -> int:
         )
         acc_id = cur.lastrowid
         from . import secure_storage
+        secrets = {}
         if pop3_pass:
-            secure_storage.set_secret(f"pop3_pass_{acc_id}", pop3_pass)
+            secrets[f"pop3_pass_{acc_id}"] = pop3_pass
         if smtp_pass:
-            secure_storage.set_secret(f"smtp_pass_{acc_id}", smtp_pass)
+            secrets[f"smtp_pass_{acc_id}"] = smtp_pass
+        secure_storage.set_secrets(secrets)
         return acc_id
 
 
@@ -499,12 +539,17 @@ def update_account(account_id: int, data: dict):
     pop3_pass = data_copy.get("pop3_password")
     smtp_pass = data_copy.get("smtp_password")
     
-    if pop3_pass is not None:
-        secure_storage.set_secret(f"pop3_pass_{account_id}", pop3_pass)
-        data_copy["pop3_password"] = ""
-    if smtp_pass is not None:
-        secure_storage.set_secret(f"smtp_pass_{account_id}", smtp_pass)
-        data_copy["smtp_password"] = ""
+    # An empty edit means "leave the saved credential unchanged". This
+    # prevents an unrelated settings change from turning a transient
+    # credential-read problem into permanent password loss.
+    secrets = {}
+    if pop3_pass:
+        secrets[f"pop3_pass_{account_id}"] = pop3_pass
+    if smtp_pass:
+        secrets[f"smtp_pass_{account_id}"] = smtp_pass
+    secure_storage.set_secrets(secrets)
+    data_copy["pop3_password"] = ""
+    data_copy["smtp_password"] = ""
 
     sets = ",".join([f"{c}=?" for c in cols])
     values = [data_copy.get(c) for c in cols] + [account_id]
@@ -577,7 +622,8 @@ def email_exists(account_id: int, folder: str, uidl: str) -> bool:
         return row is not None
 
 
-def insert_email(account_id: int, folder: str, parsed: dict, attachments: list) -> int:
+def insert_email(account_id: int, folder: str, parsed: dict, attachments: list,
+                 raw_bytes: bytes | None = None) -> int:
     from . import attachment_store
     with get_conn() as conn:
         cur = conn.execute("""
@@ -586,8 +632,9 @@ def insert_email(account_id: int, folder: str, parsed: dict, attachments: list) 
                 in_reply_to, references_hdr,
                 sender, recipients,
                 cc, bcc, subject, date_received, date_sent,
-                body_plain, body_html, is_read, has_attachments, raw_size
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                body_plain, body_html, is_read, has_attachments, raw_size,
+                raw_message
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             account_id, folder,
             parsed.get("uidl"), parsed.get("message_id"),
@@ -601,6 +648,7 @@ def insert_email(account_id: int, folder: str, parsed: dict, attachments: list) 
             1 if folder == "sent" else 0,
             1 if attachments else 0,
             parsed.get("raw_size", 0),
+            raw_bytes,
         ))
         email_id = cur.lastrowid
         for a in attachments:
@@ -819,6 +867,7 @@ def count_emails(account_id: int, folder: str, search: str="") -> int:
 
 
 def get_email(email_id: int):
+    _expand_stored_tnef_attachments(email_id)
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM emails WHERE id=?", (email_id,)).fetchone()
         if not row:
@@ -830,6 +879,94 @@ def get_email(email_id: int):
         ).fetchall()
         email["attachments"] = [dict(a) for a in atts]
         return email
+
+
+def _expand_stored_tnef_attachments(email_id: int) -> int:
+    """Replace already-stored winmail.dat rows with their real attachments.
+
+    New mail is expanded by mail_parser before insertion. This lazy migration
+    handles messages downloaded by older RunLab Mail versions: opening the
+    email upgrades its attachment list without requiring a delete/re-download.
+    Returns the number of TNEF wrapper rows successfully replaced.
+    """
+    from . import attachment_store
+    from .mail_parser import _extract_tnef_attachments, _is_tnef_attachment
+
+    replaced = 0
+    stale_hashes = []
+    try:
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, filename, mime_type, file_hash, data "
+                "FROM attachments WHERE email_id=?",
+                (email_id,),
+            ).fetchall()
+            for row in rows:
+                old = dict(row)
+                if not _is_tnef_attachment(
+                    old.get("filename"), old.get("mime_type") or ""
+                ):
+                    continue
+                if old.get("file_hash"):
+                    wrapper_data = attachment_store.load(old["file_hash"]) or b""
+                else:
+                    wrapper_data = old.get("data") or b""
+                decoded = _extract_tnef_attachments(bytes(wrapper_data))
+                if not decoded:
+                    continue
+
+                for item in decoded:
+                    file_hash, size = attachment_store.store(
+                        bytes(item.get("data") or b"")
+                    )
+                    if file_hash:
+                        conn.execute(
+                            "INSERT INTO attachment_blobs"
+                            "(file_hash, size, ref_count) VALUES (?, ?, 1) "
+                            "ON CONFLICT(file_hash) DO UPDATE "
+                            "SET ref_count=ref_count + 1",
+                            (file_hash, size),
+                        )
+                    conn.execute(
+                        "INSERT INTO attachments"
+                        "(email_id, filename, mime_type, size, file_hash, data) "
+                        "VALUES (?, ?, ?, ?, ?, NULL)",
+                        (
+                            email_id,
+                            item["filename"],
+                            item["mime_type"],
+                            size,
+                            file_hash or None,
+                        ),
+                    )
+
+                conn.execute("DELETE FROM attachments WHERE id=?", (old["id"],))
+                old_hash = old.get("file_hash")
+                if old_hash:
+                    ref = conn.execute(
+                        "UPDATE attachment_blobs "
+                        "SET ref_count=ref_count - 1 WHERE file_hash=? "
+                        "RETURNING ref_count",
+                        (old_hash,),
+                    ).fetchone()
+                    if ref and ref["ref_count"] <= 0:
+                        conn.execute(
+                            "DELETE FROM attachment_blobs WHERE file_hash=?",
+                            (old_hash,),
+                        )
+                        stale_hashes.append(old_hash)
+                replaced += 1
+    except Exception:
+        # Opening an email must remain possible even when one legacy wrapper
+        # is malformed or storage is temporarily unavailable.
+        return 0
+
+    for file_hash in stale_hashes:
+        try:
+            attachment_store.delete(file_hash)
+        except Exception:
+            pass
+    return replaced
 
 # ---------- Drafts ----------
 
@@ -994,7 +1131,7 @@ def move_outbox_to_sent(email_id: int, new_raw: bytes | None=None):
                 ).fetchone()
                 if not acc:
                     return
-            insert_email(acc["account_id"], "sent", parsed, atts)
+            insert_email(acc["account_id"], "sent", parsed, atts, raw)
         except Exception:
             pass
     # Remove the outbox row regardless of whether parse succeeded
@@ -1035,6 +1172,7 @@ def get_attachment(attachment_id: int):
 def get_attachments_for_email(email_id: int):
     """Return all attachments of an email with full binary data (loaded
     from the content store as needed)."""
+    _expand_stored_tnef_attachments(email_id)
     from . import attachment_store
     with get_conn() as conn:
         rows = conn.execute(
@@ -1119,6 +1257,141 @@ def set_flagged(email_id: int, flagged: bool=True):
     )
 
 
+# ---------- Local color categories ----------
+
+DEFAULT_CATEGORIES = (
+    ("Merah", "#d13438"),
+    ("Oranye", "#f7630c"),
+    ("Kuning", "#f2c811"),
+    ("Hijau", "#107c10"),
+    ("Biru", "#0078d4"),
+    ("Ungu", "#8764b8"),
+)
+
+
+def ensure_default_categories(account_id: int):
+    """Create the six starter categories once for a new/empty account."""
+    if account_id is None:
+        return
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT categories_initialized FROM accounts WHERE id=?",
+            (account_id,),
+        ).fetchone()
+        if not row or row["categories_initialized"]:
+            return
+        conn.executemany(
+            "INSERT OR IGNORE INTO categories(account_id,name,color,sort_order) "
+            "VALUES (?,?,?,?)",
+            [(account_id, name, color, i)
+             for i, (name, color) in enumerate(DEFAULT_CATEGORIES)],
+        )
+        conn.execute(
+            "UPDATE accounts SET categories_initialized=1 WHERE id=?",
+            (account_id,),
+        )
+
+
+def list_categories(account_id: int) -> list[dict]:
+    if account_id is None:
+        return []
+    ensure_default_categories(account_id)
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id,account_id,name,color,sort_order FROM categories "
+            "WHERE account_id=? ORDER BY sort_order,name COLLATE NOCASE",
+            (account_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def create_category(account_id: int, name: str, color: str) -> int:
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("Category name is required")
+    with get_conn() as conn:
+        order = conn.execute(
+            "SELECT COALESCE(MAX(sort_order),-1)+1 FROM categories "
+            "WHERE account_id=?", (account_id,),
+        ).fetchone()[0]
+        cur = conn.execute(
+            "INSERT INTO categories(account_id,name,color,sort_order) "
+            "VALUES (?,?,?,?)", (account_id, name, color, order),
+        )
+        return cur.lastrowid
+
+
+def update_category(category_id: int, name: str, color: str):
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("Category name is required")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE categories SET name=?,color=? WHERE id=?",
+            (name, color, category_id),
+        )
+
+
+def delete_category(category_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM categories WHERE id=?", (category_id,))
+
+
+def get_email_categories_map(email_ids) -> dict[int, list[dict]]:
+    ids = list(dict.fromkeys(int(i) for i in email_ids if i is not None))
+    result = {i: [] for i in ids}
+    if not ids:
+        return result
+    marks = ",".join("?" for _ in ids)
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT ec.email_id,c.id,c.name,c.color,c.sort_order "
+            "FROM email_categories ec JOIN categories c ON c.id=ec.category_id "
+            f"WHERE ec.email_id IN ({marks}) "
+            "ORDER BY c.sort_order,c.name COLLATE NOCASE", ids,
+        ).fetchall()
+    for row in rows:
+        result[row["email_id"]].append({
+            "id": row["id"], "name": row["name"], "color": row["color"],
+        })
+    return result
+
+
+def emails_all_have_category(email_ids, category_id: int) -> bool:
+    ids = list(dict.fromkeys(int(i) for i in email_ids if i is not None))
+    if not ids:
+        return False
+    marks = ",".join("?" for _ in ids)
+    with get_conn() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM email_categories "
+            f"WHERE category_id=? AND email_id IN ({marks})",
+            [category_id] + ids,
+        ).fetchone()[0]
+    return count == len(ids)
+
+
+def set_category_for_emails(email_ids, category_id: int, enabled: bool):
+    ids = list(dict.fromkeys(int(i) for i in email_ids if i is not None))
+    if not ids:
+        return
+    with get_conn() as conn:
+        if enabled:
+            # The join prevents assigning a category from another account.
+            conn.executemany(
+                "INSERT OR IGNORE INTO email_categories(email_id,category_id) "
+                "SELECT e.id,c.id FROM emails e JOIN categories c "
+                "ON c.id=? AND c.account_id=e.account_id WHERE e.id=?",
+                [(category_id, email_id) for email_id in ids],
+            )
+        else:
+            marks = ",".join("?" for _ in ids)
+            conn.execute(
+                "DELETE FROM email_categories WHERE category_id=? "
+                f"AND email_id IN ({marks})", [category_id] + ids,
+            )
+
+
 def move_to_trash(email_id: int):
     _exec_with_fts_repair(
         "UPDATE emails SET folder='trash' WHERE id=?",
@@ -1166,3 +1439,13 @@ def folder_counts(account_id: int):
             FROM emails WHERE account_id=? GROUP BY folder
         """, (account_id,)).fetchall()
         return {r["folder"]: {"total": r["total"], "unread": r["unread"] or 0} for r in rows}
+
+
+def list_email_ids(account_id: int, folder: str) -> list[int]:
+    """Return every local email id in a folder for safe bulk operations."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id FROM emails WHERE account_id=? AND folder=? "
+            "ORDER BY id", (account_id, folder),
+        ).fetchall()
+        return [row["id"] for row in rows]

@@ -12,15 +12,17 @@ from PyQt5.QtWidgets import (
 )
 from .ribbon_toolbar import RibbonToolbar, RibbonGroup
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap
 
 from core import database, pop3_client, smtp_client, updater
 from core import imap_client
 from core import license as licmod
+from core.recipient_utils import build_reply_all_recipients
 from core.version import __version__
 from .account_dialog import AccountDialog
 from .accounts_list_dialog import AccountsListDialog
 from .compose_dialog import ComposeDialog
+from .category_dialog import CategoryManagerDialog
 from .email_view import EmailView
 from .update_dialog import UpdateDialog
 from .banner import NotificationBanner
@@ -241,6 +243,23 @@ class JunkFetchWorker(QThread):
             self.done.emit(self.account["id"], 0, str(e))
 
 
+def _folder_label(fkey: str, fname: str, icon: str, counts: dict) -> str:
+    """Build a sidebar label from the folder's meaningful pending count.
+
+    Inbox and Junk show unread messages; Outbox shows every queued message.
+    Keeping this rule in one place prevents the full tree rebuild and the
+    incremental count refresh from rendering different badges.
+    """
+    total = int((counts or {}).get("total") or 0)
+    unread = int((counts or {}).get("unread") or 0)
+    badge = 0
+    if fkey in ("inbox", "spam"):
+        badge = unread
+    elif fkey == "outbox":
+        badge = total
+    return f"{icon}  {fname} ({badge})" if badge else f"{icon}  {fname}"
+
+
 # ---------- Main window ----------
 class MainWindow(QMainWindow):
     FOLDERS = [
@@ -373,6 +392,23 @@ class MainWindow(QMainWindow):
         self.search_edit.setMaximumWidth(420)
         self.search_edit.textChanged.connect(self._on_search_changed)
         search_group.btn_layout.addWidget(self.search_edit)
+
+        # Tags Group — local follow-up flag and Outlook-style categories.
+        tags_group = home_tab.add_group("Tags")
+        self._btn_flag = tags_group.add_button(
+            "Flag", None, self._toggle_selected_flag,
+            tooltip="Flag the selected email or conversation for follow-up",
+        )
+        self._btn_categorize = tags_group.add_button(
+            "Categorize", None,
+            tooltip="Assign color categories to the selected email",
+        )
+        self._category_menu = QMenu(self._btn_categorize)
+        self._category_menu.aboutToShow.connect(self._populate_category_menu)
+        self._btn_categorize.setMenu(self._category_menu)
+        self._btn_categorize.setPopupMode(QToolButton.InstantPopup)
+        self._btn_flag.setEnabled(False)
+        self._btn_categorize.setEnabled(False)
         
         # Account Group
         account_group = home_tab.add_group("Account")
@@ -482,6 +518,7 @@ class MainWindow(QMainWindow):
 
         self.email_list = EmailListWidget()
         self.email_list.itemSelectionChanged.connect(self._on_email_selected)
+        self.email_list.left_item_pressed.connect(self._on_email_left_pressed)
         self.email_list.itemDoubleClicked.connect(self._on_email_double_clicked)
         self.email_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.email_list.customContextMenuRequested.connect(self._list_menu)
@@ -545,16 +582,13 @@ class MainWindow(QMainWindow):
             f = top.font(0); f.setBold(True); top.setFont(0, f)
             for fkey, fname, icon in self.FOLDERS:
                 c = counts.get(fkey, {"total": 0, "unread": 0})
-                if fkey == "inbox" and c["unread"]:
-                    label = f'{icon}  {fname} ({c["unread"]})'
-                elif fkey == "outbox" and c["total"]:
-                    # Show pending count in red so user notices stuck mail
-                    label = f'{icon}  {fname} ({c["total"]})'
-                else:
-                    label = f'{icon}  {fname}'
+                label = _folder_label(fkey, fname, icon, c)
                 child = QTreeWidgetItem([label])
                 child.setData(0, Qt.UserRole, ("folder", acc["id"], fkey))
                 if fkey == "outbox" and c["total"]:
+                    child.setForeground(0, Qt.red)
+                elif fkey == "spam" and c["unread"]:
+                    # Junk should be as noticeable as pending Outbox mail.
                     child.setForeground(0, Qt.red)
                 top.addChild(child)
             self.tree.addTopLevelItem(top)
@@ -615,10 +649,39 @@ class MainWindow(QMainWindow):
             menu.addAction("Delete account", lambda: self._delete_account(acc_id))
         elif data[0] == "folder":
             _, acc_id, folder = data
-            menu.addAction(
-                "Mark all as read",
-                lambda: self._mark_all_read_for(acc_id, folder),
-            )
+            if folder in ("inbox", "sent"):
+                menu.addAction(
+                    "Mark all as read",
+                    lambda: self._mark_all_read_for(acc_id, folder),
+                )
+            elif folder == "drafts":
+                menu.addAction(
+                    "Delete all drafts…",
+                    lambda: self._empty_special_folder(acc_id, "drafts"),
+                )
+            elif folder == "outbox":
+                menu.addAction(
+                    "Send all", lambda: self._flush_outbox_account(acc_id)
+                )
+                menu.addAction(
+                    "Remove all from Outbox…",
+                    lambda: self._empty_special_folder(acc_id, "outbox"),
+                )
+            elif folder == "spam":
+                menu.addAction(
+                    "Mark all as read",
+                    lambda: self._mark_all_read_for(acc_id, folder),
+                )
+                menu.addSeparator()
+                menu.addAction(
+                    "Empty Junk…",
+                    lambda: self._empty_special_folder(acc_id, "spam"),
+                )
+            elif folder == "trash":
+                menu.addAction(
+                    "Empty Trash…",
+                    lambda: self._empty_special_folder(acc_id, "trash"),
+                )
         else:
             return
         menu.exec_(self.tree.viewport().mapToGlobal(pos))
@@ -629,6 +692,7 @@ class MainWindow(QMainWindow):
     def _refresh_email_list(self):
         self.email_list.reset_threads(self.current_folder)
         self.viewer.show_empty()
+        self._update_tag_buttons()
         self._loaded_count = 0
         if self.current_account_id is None:
             self.view_bar.set_count(0)
@@ -669,6 +733,11 @@ class MainWindow(QMainWindow):
                 sort_desc=self.view_bar.sort_desc,
                 limit=2000,
             )
+            category_map = database.get_email_categories_map(
+                e["id"] for e in emails
+            )
+            for email_row in emails:
+                email_row["categories"] = category_map.get(email_row["id"], [])
             self._pending_thread_registry = {}
             emails = self._apply_grouping(emails)
             self._loaded_count = self._total_count  # treat as fully loaded
@@ -677,6 +746,11 @@ class MainWindow(QMainWindow):
                     self, "_pending_thread_registry", {}).items():
                 self.email_list.register_thread(key, children)
         else:
+            category_map = database.get_email_categories_map(
+                e["id"] for e in emails
+            )
+            for email_row in emails:
+                email_row["categories"] = category_map.get(email_row["id"], [])
             self._loaded_count += len(emails)
 
         for e in emails:
@@ -806,6 +880,12 @@ class MainWindow(QMainWindow):
                 # Show a flag on the head if any message in the thread is flagged
                 if any(it.get("is_flagged") for it in items):
                     head["is_flagged"] = 1
+                # Conversation heads display the union of member categories.
+                categories = {}
+                for thread_item in items:
+                    for category in thread_item.get("categories") or []:
+                        categories[category["id"]] = category
+                head["categories"] = list(categories.values())
                 # Threading metadata for the list widget / delegate.
                 head["_thread_role"] = "head"
                 head["_thread_count"] = count
@@ -835,21 +915,32 @@ class MainWindow(QMainWindow):
             return iso
 
     def _on_email_selected(self):
-        email_id = self.email_list.selected_email_id()
+        items = self.email_list.selectedItems()
+        if not items:
+            self.viewer.show_empty()
+            self._update_tag_buttons()
+            return
+        item = items[0]
+        email_id = item.data(ROLE_EMAIL_ID)
         if email_id is None:
             self.viewer.show_empty()
+            self._update_tag_buttons()
             return
-        # Drafts open in compose dialog instead of read-only viewer
+        # Right-click also changes selection, so selection alone must not
+        # launch a draft. A dedicated left-click signal handles opening.
         if self.current_folder == "drafts":
-            self._open_draft(email_id)
-            self.email_list.clearSelection()
+            self._update_tag_buttons()
             return
         # Outbox: show read-only viewer (don't mark as read; it's outgoing)
         if self.current_folder == "outbox":
             self.viewer.show_email(email_id)
+            self._update_tag_buttons()
             return
-        database.mark_read(email_id, True)
+        thread_ids = self.email_list.email_ids_for_item(item)
+        for eid in thread_ids:
+            database.mark_read(eid, True)
         self.viewer.show_email(email_id)
+        self._update_tag_buttons()
         # Visual: remove unread bar/bold for the now-read row
         row = self.email_list.currentRow()
         if row >= 0:
@@ -862,9 +953,9 @@ class MainWindow(QMainWindow):
         email_id = item.data(ROLE_EMAIL_ID)
         if email_id is None:
             return
-        # Drafts: open in compose dialog
+        # A left press already opened a draft; don't create a second Compose
+        # window when that click is recognized as a double-click.
         if self.current_folder == "drafts":
-            self._open_draft(email_id)
             return
         # Outbox: open in compose dialog so the user can fix a typo'd
         # recipient (or anything else) before the message goes out.
@@ -882,10 +973,19 @@ class MainWindow(QMainWindow):
                 w.raise_()
                 w.activateWindow()
                 return
-        win = EmailWindow(email_id, parent=self)
+        win = EmailWindow(email_id, parent=None)
         win.compose_requested.connect(self._on_compose_from_email_window)
         self._email_windows.append(win)
         win.show()
+
+    def _on_email_left_pressed(self, item):
+        """Open Drafts only from an actual left mouse press."""
+        if self.current_folder != "drafts" or item is None:
+            return
+        email_id = item.data(ROLE_EMAIL_ID)
+        if email_id is not None:
+            self._open_draft(email_id)
+            self.email_list.clearSelection()
 
     def _on_compose_from_email_window(self, kind: str, email_id: int):
         """Reply/Reply-All/Forward triggered from a detached EmailWindow.
@@ -894,14 +994,17 @@ class MainWindow(QMainWindow):
         if email:
             self._reply_or_forward(email, kind)
 
-    def _update_folder_counts(self):
-        if self.current_account_id is None:
+    def _update_folder_counts(self, account_id: int | None = None):
+        target_account_id = (
+            self.current_account_id if account_id is None else account_id
+        )
+        if target_account_id is None:
             return
-        counts = database.folder_counts(self.current_account_id)
+        counts = database.folder_counts(target_account_id)
         for i in range(self.tree.topLevelItemCount()):
             top = self.tree.topLevelItem(i)
             data = top.data(0, Qt.UserRole)
-            if not data or data[1] != self.current_account_id:
+            if not data or data[1] != target_account_id:
                 continue
             for j in range(top.childCount()):
                 child = top.child(j)
@@ -912,14 +1015,13 @@ class MainWindow(QMainWindow):
                 fname = next((n for k, n, _ in self.FOLDERS if k == fkey), fkey)
                 icon = next((ic for k, _, ic in self.FOLDERS if k == fkey), "")
                 c = counts.get(fkey, {"total": 0, "unread": 0})
-                if fkey == "inbox" and c["unread"]:
-                    child.setText(0, f'{icon}  {fname} ({c["unread"]})')
-                elif fkey == "outbox" and c["total"]:
-                    child.setText(0, f'{icon}  {fname} ({c["total"]})')
+                child.setText(0, _folder_label(fkey, fname, icon, c))
+                if fkey == "outbox" and c["total"]:
+                    child.setForeground(0, Qt.red)
+                elif fkey == "spam" and c["unread"]:
                     child.setForeground(0, Qt.red)
                 else:
-                    child.setText(0, f'{icon}  {fname}')
-                    child.setForeground(0, Qt.black if fkey != "outbox" else Qt.black)
+                    child.setForeground(0, Qt.black)
 
     def _on_search_changed(self, text):
         self.current_search = text.strip()
@@ -938,7 +1040,15 @@ class MainWindow(QMainWindow):
         # thread appears to do nothing because unread children remain.
         thread_ids = self.email_list.email_ids_for_item(item)
         menu = QMenu(self)
-        menu.addAction("Open", lambda: self.viewer.show_email(email_id))
+        if self.current_folder == "drafts":
+            menu.addAction("Open / Edit", lambda: self._open_draft(email_id))
+            menu.addAction(
+                "Delete draft…", lambda: self._delete_draft_entry(email_id)
+            )
+            menu.exec_(self.email_list.viewport().mapToGlobal(pos))
+            return
+        else:
+            menu.addAction("Open", lambda: self.viewer.show_email(email_id))
         menu.addSeparator()
         # Outbox: stuck/failed mail management (edit + resend + remove)
         if self.current_folder == "outbox":
@@ -949,10 +1059,10 @@ class MainWindow(QMainWindow):
             menu.exec_(self.email_list.viewport().mapToGlobal(pos))
             return
 
-        menu.addAction("Mark as read", lambda: self._mark_read(thread_ids, True))
-        menu.addAction("Mark as unread", lambda: self._mark_read(thread_ids, False))
-        menu.addAction("Mark all as read", self._mark_all_read)
-        menu.addSeparator()
+        if self.current_folder in ("inbox", "spam", "trash"):
+            menu.addAction("Mark as read", lambda: self._mark_read(thread_ids, True))
+            menu.addAction("Mark as unread", lambda: self._mark_read(thread_ids, False))
+            menu.addSeparator()
         # Follow-up flag (Outlook-style). Toggle based on current state.
         is_flagged = bool(item.data(ROLE_FLAGGED))
         if is_flagged:
@@ -961,22 +1071,47 @@ class MainWindow(QMainWindow):
         else:
             menu.addAction("🚩  Flag for follow-up",
                            lambda: self._set_flag(thread_ids, True))
+        category_menu = menu.addMenu("Categorize")
+        self._fill_category_menu(category_menu, thread_ids)
+        menu.addAction("Export as .eml…", lambda: self._export_emails(thread_ids))
         menu.addSeparator()
         if self.current_folder == "spam":
             menu.addAction("Not junk (move to Inbox)",
                            lambda: self._mark_not_spam(email_id))
+            menu.addAction("Move to Trash",
+                           lambda: self._trash_email(email_id))
         elif self.current_folder == "trash":
+            menu.addAction("Restore to Inbox",
+                           lambda: self._restore_from_trash(email_id))
             menu.addAction("Delete permanently",
                            lambda: self._delete_email(email_id))
-        else:
+        elif self.current_folder == "sent":
+            menu.addAction("Move to Trash",
+                           lambda: self._trash_email(email_id))
+        elif self.current_folder == "inbox":
             menu.addAction("Move to Junk 🚫",
                            lambda: self._mark_spam(email_id))
             menu.addAction("Move to Trash",
                            lambda: self._trash_email(email_id))
-        if self.current_folder == "trash":
-            menu.addAction("Delete permanently",
-                           lambda: self._delete_email(email_id))
         menu.exec_(self.email_list.viewport().mapToGlobal(pos))
+
+    def _export_emails(self, email_ids):
+        from PyQt5.QtWidgets import QFileDialog
+        from core.email_export import export_emails, get_last_export_dir
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose folder for email evidence", get_last_export_dir()
+        )
+        if not folder:
+            return
+        try:
+            files = export_emails(email_ids, folder)
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        QMessageBox.information(
+            self, "Email evidence exported",
+            f"Saved {len(files)} email(s) as .eml files."
+        )
 
     def _mark_spam(self, email_id):
         database.move_to_spam(email_id)
@@ -1027,10 +1162,13 @@ class MainWindow(QMainWindow):
     def _on_junk_refreshed(self, account_id: int, new_count: int, err: str):
         if err:
             return
-        if new_count > 0 and self.current_folder == "spam" and self.current_account_id == account_id:
+        if (new_count > 0 and self.current_folder == "spam"
+                and self.current_account_id == account_id):
             self._refresh_email_list()
-            self._update_folder_counts()
             self.status_label.setText(f"Fetched {new_count} new junk message(s) from server.")
+        # Always refresh the affected account's badge. The user may have
+        # changed folders/accounts while the background IMAP request ran.
+        self._update_folder_counts(account_id)
 
     def _mark_not_spam(self, email_id):
         # If from IMAP Junk: also remove from server's Junk folder.
@@ -1054,6 +1192,76 @@ class MainWindow(QMainWindow):
         # Instant visual update on the visible (head) row without a reload.
         if ids:
             self.email_list.set_flagged_visual(ids[0], flagged)
+        self._update_tag_buttons()
+
+    def _selected_thread_ids(self):
+        items = self.email_list.selectedItems()
+        if not items or self.current_folder == "outbox":
+            return []
+        return self.email_list.email_ids_for_item(items[0])
+
+    def _update_tag_buttons(self):
+        if not hasattr(self, "_btn_flag"):
+            return
+        items = self.email_list.selectedItems() if hasattr(self, "email_list") else []
+        enabled = bool(items) and self.current_folder != "outbox"
+        self._btn_flag.setEnabled(enabled)
+        self._btn_categorize.setEnabled(enabled and self.current_account_id is not None)
+        flagged = bool(items and items[0].data(ROLE_FLAGGED))
+        self._btn_flag.setText("Clear Flag" if flagged else "Flag")
+        self._btn_flag.setToolTip(
+            "Clear the follow-up flag" if flagged
+            else "Flag the selected email or conversation for follow-up"
+        )
+
+    def _toggle_selected_flag(self):
+        items = self.email_list.selectedItems()
+        ids = self._selected_thread_ids()
+        if not items or not ids:
+            return
+        self._set_flag(ids, not bool(items[0].data(ROLE_FLAGGED)))
+
+    def _fill_category_menu(self, menu, email_ids):
+        menu.clear()
+        categories = database.list_categories(self.current_account_id)
+        for category in categories:
+            action = menu.addAction(category["name"])
+            action.setCheckable(True)
+            action.setChecked(database.emails_all_have_category(
+                email_ids, category["id"]
+            ))
+            pixmap = QPixmap(14, 14)
+            pixmap.fill(QColor(category["color"]))
+            action.setIcon(QIcon(pixmap))
+            action.triggered.connect(
+                lambda _checked=False, cid=category["id"]:
+                self._toggle_category(cid)
+            )
+        menu.addSeparator()
+        menu.addAction("Manage Categories…", self._manage_categories)
+
+    def _populate_category_menu(self):
+        ids = self._selected_thread_ids()
+        if ids:
+            self._fill_category_menu(self._category_menu, ids)
+        else:
+            self._category_menu.clear()
+
+    def _toggle_category(self, category_id):
+        ids = self._selected_thread_ids()
+        if not ids:
+            return
+        enable = not database.emails_all_have_category(ids, category_id)
+        database.set_category_for_emails(ids, category_id, enable)
+        self._refresh_email_list()
+
+    def _manage_categories(self):
+        if self.current_account_id is None:
+            return
+        dialog = CategoryManagerDialog(self.current_account_id, self)
+        dialog.exec_()
+        if dialog.changed:
+            self._refresh_email_list()
 
     def _mark_all_read(self):
         if self.current_account_id is None:
@@ -1077,6 +1285,62 @@ class MainWindow(QMainWindow):
         database.move_to_trash(email_id)
         self._refresh_email_list()
         self._update_folder_counts()
+
+    def _restore_from_trash(self, email_id):
+        database.move_to_inbox(email_id)
+        self._refresh_email_list()
+        self._update_folder_counts()
+        self.status_label.setText("Restored to Inbox.")
+
+    def _delete_draft_entry(self, email_id):
+        if QMessageBox.question(
+            self, "Delete Draft", "Permanently delete this draft?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        database.delete_draft(email_id)
+        self._refresh_email_list()
+        self._update_folder_counts()
+
+    def _empty_special_folder(self, account_id: int, folder: str):
+        ids = database.list_email_ids(account_id, folder)
+        labels = {
+            "drafts": ("Delete All Drafts", "drafts"),
+            "outbox": ("Remove All from Outbox", "queued messages"),
+            "spam": ("Empty Junk", "junk messages"),
+            "trash": ("Empty Trash", "trashed messages"),
+        }
+        title, noun = labels[folder]
+        if not ids:
+            self.status_label.setText(f"{title}: folder is already empty.")
+            return
+        if QMessageBox.question(
+            self, title,
+            f"Permanently remove {len(ids)} {noun}?\n\n"
+            "This action cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+
+        if folder == "spam":
+            # IMAP Junk copies are purged server-side best-effort; POP3 and
+            # locally classified junk remain local-only by design.
+            self._server_delete_if_imap(ids, reason="Emptied Junk")
+        for email_id in ids:
+            if folder == "drafts":
+                database.delete_draft(email_id)
+            elif folder == "outbox":
+                database.delete_outbox(email_id)
+            else:
+                # Uses the attachment-aware delete path for Junk and Trash.
+                database.delete_email(email_id)
+
+        if (account_id == self.current_account_id
+                and folder == self.current_folder):
+            self._refresh_email_list()
+        self._update_folder_counts()
+        self._refresh_accounts_tree()
+        self.status_label.setText(f"{title}: removed {len(ids)} message(s).")
 
     def _delete_email(self, email_id):
         if QMessageBox.question(self, "Delete", "Permanently delete this email?") == QMessageBox.Yes:
@@ -1314,6 +1578,19 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Flushing outbox...")
         self._outbox_errors = []  # collect (outbox_id, error) for bounce log
         self._outbox_worker = OutboxFlushWorker()
+        self._outbox_worker.sent_one.connect(self._on_outbox_sent)
+        self._outbox_worker.failed_one.connect(self._on_outbox_failed)
+        self._outbox_worker.done.connect(self._on_outbox_flush_done_manual)
+        self._outbox_worker.start()
+
+    def _flush_outbox_account(self, account_id: int):
+        """Flush only the Outbox belonging to the folder/account clicked."""
+        if self._outbox_worker and self._outbox_worker.isRunning():
+            self.status_label.setText("Outbox is already flushing...")
+            return
+        self.status_label.setText("Flushing selected outbox...")
+        self._outbox_errors = []
+        self._outbox_worker = OutboxFlushWorker(account_id=account_id)
         self._outbox_worker.sent_one.connect(self._on_outbox_sent)
         self._outbox_worker.failed_one.connect(self._on_outbox_failed)
         self._outbox_worker.done.connect(self._on_outbox_flush_done_manual)
@@ -1799,24 +2076,30 @@ class MainWindow(QMainWindow):
             prefill["subject"] = self._prefix_subject(original_subject, "Re: ")
             prefill["body_html"] = body_html_quoted
         elif mode == "reply_all":
-            prefill["to"] = email.get("sender") or ""
-            prefill["cc"] = email.get("cc") or ""
+            account = database.get_account(self.current_account_id) or {}
+            reply_to, reply_cc = build_reply_all_recipients(
+                email.get("sender") or "",
+                email.get("recipients") or "",
+                email.get("cc") or "",
+                account.get("email") or "",
+            )
+            prefill["to"] = reply_to
+            prefill["cc"] = reply_cc
             prefill["subject"] = self._prefix_subject(original_subject, "Re: ")
             prefill["body_html"] = body_html_quoted
         elif mode == "forward":
             prefill["subject"] = self._prefix_subject(original_subject, "Fwd: ")
             prefill["body_html"] = body_html_quoted
 
-        # Re-attach the original email's attachments. Forward sends them
-        # along automatically (Outlook behavior). Reply / Reply All also
-        # carry them so the user doesn't lose context — they can hit
-        # Remove if not needed.
-        try:
-            atts = database.get_attachments_for_email(email["id"])
-        except Exception:
-            atts = []
-        if atts:
-            prefill["forwarded_attachments"] = atts
+        # Match Outlook behavior: only Forward carries the original files.
+        # Reply and Reply All quote the body without re-attaching them.
+        if mode == "forward":
+            try:
+                atts = database.get_attachments_for_email(email["id"])
+            except Exception:
+                atts = []
+            if atts:
+                prefill["forwarded_attachments"] = atts
 
         try:
             dlg = ComposeDialog(

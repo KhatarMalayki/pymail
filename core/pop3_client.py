@@ -138,7 +138,7 @@ def fetch_new(account: dict, progress_cb=None, log_cb=None, max_bytes: int | Non
 
             # === Success path ===
             parsed, attachments = parse_message(raw, uidl=uidl)
-            database.insert_email(account["id"], "inbox", parsed, attachments)
+            database.insert_email(account["id"], "inbox", parsed, attachments, raw)
             new_count += 1
             if log_cb:
                 log_cb(f"  + {parsed.get('subject', '(no subject)')[:60]}")

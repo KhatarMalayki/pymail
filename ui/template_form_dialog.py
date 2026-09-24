@@ -15,24 +15,25 @@ class TunasTemplateForm(QDialog):
                  default_role: str = "IT Operational",
                  default_phone: str = "021-7486 1000",
                  default_address: str = "Bintaro Komersial CBD B7 Kavling "
-                                        "A1/02, Bintaro Jaya, Tangerang 15224"):
+                                        "A1/02, Bintaro Jaya, Tangerang 15224",
+                 template_label: str = "Tunas"):
         super().__init__(parent)
-        self.setWindowTitle("Tunas Signature Template")
+        self.setWindowTitle(f"{template_label} Signature Template")
         self.resize(560, 320)
         self.result_data: dict | None = None
         self._build_ui(
             default_name, default_email, default_role,
-            default_phone, default_address,
+            default_phone, default_address, template_label,
         )
 
-    def _build_ui(self, name, email, role, phone, address):
+    def _build_ui(self, name, email, role, phone, address, template_label):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(12)
 
         intro = QLabel(
-            "Fill in the fields below — they'll be inserted into the Tunas "
-            "corporate signature template."
+            f"Fill in the fields below — they'll be inserted into the "
+            f"{template_label} corporate signature template."
         )
         intro.setStyleSheet("color:#605e5c;")
         intro.setWordWrap(True)
@@ -69,8 +70,8 @@ class TunasTemplateForm(QDialog):
 
         hint = QLabel(
             "<i style='color:#605e5c;font-size:9pt;'>"
-            "External images (logo, social icons, banners) will be downloaded "
-            "and embedded so the signature works offline."
+            "The logo and contact icons are bundled and embedded, so the "
+            "signature also works offline."
             "</i>"
         )
         hint.setTextFormat(Qt.RichText)

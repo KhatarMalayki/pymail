@@ -12,6 +12,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
+from html.parser import HTMLParser
 
 
 _DATA_URI_RE = re.compile(
@@ -41,6 +42,118 @@ _IMG_FETCH_TIMEOUT = 8          # seconds per image
 _IMG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB cap per image
 _IMG_MAX_COUNT = 20             # don't download more than this per message
 _IMG_USER_AGENT = "Mozilla/5.0 (RunLabMail; signature send)"
+
+# Outgoing mail is deliberately link-free.  Long reply chains otherwise copy
+# every old <a href> into each new message, which can multiply the number of
+# URLs inspected by Microsoft/Exchange filters.  The plain-text alternative is
+# cleaned too because filters inspect every MIME part, not only rendered HTML.
+_PLAIN_URL_RE = re.compile(
+    r"(?i)(?<![@\w])(?:https?://|www\.)[^\s<>\[\]{}]+"
+)
+_CSS_EXTERNAL_URL_RE = re.compile(
+    r"(?i)url\(\s*(['\"]?)https?://.*?\1\s*\)"
+)
+_URL_ATTRIBUTES = {"href", "srcset", "action", "formaction", "background", "poster"}
+
+
+def _strip_plaintext_urls(text: str) -> str:
+    """Remove web URLs from the text MIME alternative.
+
+    Email addresses are intentionally preserved.  Keeping a short marker also
+    makes it clear to recipients that content was removed by policy.
+    """
+    return _PLAIN_URL_RE.sub("[link removed]", text or "")
+
+
+class _LinkFreeHTMLParser(HTMLParser):
+    """Serialize HTML while removing links and unsafe external URL targets."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.parts: list[str] = []
+
+    @staticmethod
+    def _escape_attr(value: str) -> str:
+        return (value.replace("&", "&amp;")
+                     .replace('"', "&quot;")
+                     .replace("<", "&lt;")
+                     .replace(">", "&gt;"))
+
+    def handle_starttag(self, tag, attrs):
+        tag_lower = tag.lower()
+        # Remove the anchor element but retain its visible child content.
+        if tag_lower == "a":
+            return
+
+        cleaned = []
+        for name, value in attrs:
+            name_lower = name.lower()
+            if name_lower in _URL_ATTRIBUTES:
+                continue
+            if name_lower == "src":
+                # Only embedded images are allowed onto the wire.  A failed
+                # remote-image download must not leak its original URL.
+                if not value or not value.lower().startswith(("cid:", "data:image/")):
+                    continue
+            if name_lower == "style" and value:
+                value = _CSS_EXTERNAL_URL_RE.sub("", value)
+            cleaned.append((name, value))
+
+        rendered_attrs = "".join(
+            f" {name}" if value is None
+            else f' {name}="{self._escape_attr(value)}"'
+            for name, value in cleaned
+        )
+        self.parts.append(f"<{tag}{rendered_attrs}>")
+
+    def handle_startendtag(self, tag, attrs):
+        if tag.lower() == "a":
+            return
+        before = len(self.parts)
+        self.handle_starttag(tag, attrs)
+        if len(self.parts) > before:
+            self.parts[-1] = self.parts[-1][:-1] + " />"
+
+    def handle_endtag(self, tag):
+        if tag.lower() != "a":
+            self.parts.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        self.parts.append(_strip_plaintext_urls(data))
+
+    def handle_entityref(self, name):
+        self.parts.append(f"&{name};")
+
+    def handle_charref(self, name):
+        self.parts.append(f"&#{name};")
+
+    def handle_comment(self, data):
+        self.parts.append(f"<!--{data}-->")
+
+    def handle_decl(self, decl):
+        self.parts.append(f"<!{decl}>")
+
+
+def _strip_hyperlinks(html: str) -> str:
+    """Return HTML with anchors and external URL-bearing attributes removed."""
+    if not html:
+        return html
+    parser = _LinkFreeHTMLParser()
+    try:
+        parser.feed(html)
+        parser.close()
+        return "".join(parser.parts)
+    except Exception:
+        # Malformed legacy HTML must not bypass the policy.  This conservative
+        # fallback removes anchor wrappers/targets while preserving text.
+        html = re.sub(r"(?is)<a\b[^>]*>", "", html)
+        html = re.sub(r"(?is)</a\s*>", "", html)
+        return re.sub(
+            r"(?is)\s(?:href|srcset|action|formaction|background|poster)\s*=\s*"
+            r"(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
+            "",
+            html,
+        )
 
 
 def _fetch_external_image(url: str) -> tuple[str, bytes | None, str]:
@@ -200,7 +313,7 @@ def build_message(
     domain = parseaddr(from_addr)[1].split("@")[-1] or "localhost"
     msg["Message-ID"] = make_msgid(domain=domain)
 
-    msg.set_content(body_text or "")
+    msg.set_content(_strip_plaintext_urls(body_text or ""))
     if body_html:
         # Safety net: download any remaining external http(s) images and
         # inline them as data: URIs first. This catches signature images
@@ -214,6 +327,7 @@ def build_message(
         # render data: URIs as ugly broken-attachment placeholders or
         # separate attachments at the bottom of the message.
         body_html_cid, related_images = _data_uris_to_cid(body_html)
+        body_html_cid = _strip_hyperlinks(body_html_cid)
         if related_images:
             msg.add_alternative(body_html_cid, subtype="html")
             html_part = msg.get_payload()[-1]
@@ -225,7 +339,7 @@ def build_message(
                     cid=cid,
                 )
         else:
-            msg.add_alternative(body_html, subtype="html")
+            msg.add_alternative(body_html_cid, subtype="html")
 
     for att in attachments or []:
         # Two formats supported:

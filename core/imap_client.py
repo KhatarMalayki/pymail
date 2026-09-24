@@ -220,7 +220,7 @@ def fetch_junk(account: dict, progress_cb=None, log_cb=None) -> int:
                 if not raw:
                     continue
                 parsed, attachments = parse_message(raw, uidl=local_uid)
-                database.insert_email(account["id"], LOCAL_FOLDER, parsed, attachments)
+                database.insert_email(account["id"], LOCAL_FOLDER, parsed, attachments, raw)
                 new_count += 1
             except Exception as e:
                 if log_cb:

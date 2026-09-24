@@ -78,6 +78,8 @@ def main():
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--clean", "--onedir",
         "--name", APP_NAME,
+        "--hidden-import", "tnefparse",
+        "--copy-metadata", "tnefparse",
         "main.py",
     ]
     if not args.debug:

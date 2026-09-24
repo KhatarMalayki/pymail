@@ -16,11 +16,51 @@ Storage location: alongside other config in ~/.runlabmail/secrets.dat
 """
 import base64
 import json
+import os
 import sys
+import tempfile
+import threading
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 from . import config
 
-SECRETS_FILE = config.DEFAULT_BASE / "secrets.dat"
+PRIMARY_SECRETS_FILE = config.DEFAULT_BASE / "secrets.dat"
+RECOVERY_SECRETS_FILE = Path(
+    os.environ.get("LOCALAPPDATA") or config.DEFAULT_BASE
+) / "RunLabMail" / "secrets.dat"
+
+
+def _initial_secrets_file() -> Path:
+    """Prefer a previously-created recovery store over the locked legacy one."""
+    recovery_dir = RECOVERY_SECRETS_FILE.parent
+    try:
+        candidates = list(recovery_dir.glob("secrets*.dat"))
+        if candidates:
+            return max(candidates, key=lambda p: p.stat().st_mtime_ns)
+    except OSError:
+        pass
+    return PRIMARY_SECRETS_FILE
+
+
+SECRETS_FILE = _initial_secrets_file()
+_STORE_LOCK = threading.RLock()
+
+
+class SecretStorageError(RuntimeError):
+    """Raised when credentials cannot be stored durably."""
+
+    def __init__(self, message: str, *, can_reset_store: bool = False):
+        super().__init__(message)
+        self.can_reset_store = can_reset_store
+
+
+@dataclass(frozen=True)
+class StoreRecoveryResult:
+    preserved_path: Path | None
+    active_path: Path
+    moved_to_backup: bool
 
 
 def _is_windows() -> bool:
@@ -107,63 +147,86 @@ def _dpapi_decrypt(ciphertext: bytes) -> bytes | None:
 # ---------- Public API ----------
 
 
-def _read_store() -> dict:
+def _read_store(*, strict: bool = False) -> dict:
     if not SECRETS_FILE.is_file():
         return {}
     try:
-        return json.loads(SECRETS_FILE.read_text(encoding="utf-8"))
-    except Exception:
+        data = json.loads(SECRETS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("credential store root is not an object")
+        return data
+    except Exception as exc:
+        if strict:
+            raise SecretStorageError(
+                "The credential store is unreadable or damaged. It was not "
+                "overwritten; restore it or re-enter the account password.",
+                can_reset_store=True,
+            ) from exc
         return {}
 
 
 def _write_store(data: dict) -> None:
+    """Atomically replace the credential store or raise."""
+    SECRETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = None
     try:
-        SECRETS_FILE.write_text(
-            json.dumps(data, indent=2), encoding="utf-8"
-        )
-        # Permissions: best-effort tighten on Windows so other users can't
-        # read the file. (DPAPI alone is enough security but defence in depth.)
-        if _is_windows():
-            import os
+        payload = json.dumps(data, indent=2)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=SECRETS_FILE.parent,
+            prefix=f".{SECRETS_FILE.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_path = tmp.name
+            tmp.write(payload)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_path, SECRETS_FILE)
+        tmp_path = None
+
+        # DPAPI already binds ciphertext to this Windows login. Do not remove
+        # inherited ACLs here: on domain/renamed accounts an unresolved
+        # %USERNAME% grant can make the freshly written file unreadable.
+    except Exception as exc:
+        raise SecretStorageError(
+            f"Could not save encrypted passwords to {SECRETS_FILE}."
+        ) from exc
+    finally:
+        if tmp_path:
             try:
-                os.system(f'icacls "{SECRETS_FILE}" /inheritance:r '
-                          f'/grant:r "%USERNAME%":F >nul 2>&1')
-            except Exception:
+                os.unlink(tmp_path)
+            except OSError:
                 pass
-    except Exception:
-        pass
 
 
-def set_secret(key: str, value: str) -> None:
-    """Store a secret. On Windows it's DPAPI-encrypted with the user's
-    login credentials. On other platforms it falls back to base64
-    (NOT secure — but the app should only be deployed on Windows)."""
+def _encode_entry(value: str) -> dict:
     raw = (value or "").encode("utf-8")
     encrypted = _dpapi_encrypt(raw)
-    store = _read_store()
     if encrypted is not None:
-        store[key] = {
+        return {
             "v": 1,
             "enc": "dpapi",
             "data": base64.b64encode(encrypted).decode("ascii"),
         }
-    else:
-        # Fallback (dev mode / non-Windows)
-        store[key] = {
-            "v": 1,
-            "enc": "plain",
-            "data": base64.b64encode(raw).decode("ascii"),
-        }
-    _write_store(store)
+    if _is_windows():
+        raise SecretStorageError(
+            "Windows could not encrypt the password with DPAPI. The password "
+            "was not changed."
+        )
+    return {
+        "v": 1,
+        "enc": "plain",
+        "data": base64.b64encode(raw).decode("ascii"),
+    }
 
 
-def get_secret(key: str, default: str="") -> str:
-    """Retrieve a secret. Returns default if missing or decryption fails."""
-    store = _read_store()
-    entry = store.get(key)
-    if not entry:
+def _decode_entry(entry: dict, default: str = "") -> str:
+    try:
+        blob = base64.b64decode(entry.get("data", "") or "")
+    except Exception:
         return default
-    blob = base64.b64decode(entry.get("data", "") or "")
     if entry.get("enc") == "dpapi":
         decoded = _dpapi_decrypt(blob)
         if decoded is None:
@@ -172,11 +235,130 @@ def get_secret(key: str, default: str="") -> str:
     return blob.decode("utf-8", errors="replace")
 
 
-def delete_secret(key: str) -> None:
-    store = _read_store()
-    if key in store:
-        del store[key]
-        _write_store(store)
+def set_secrets(values: dict[str, str]) -> None:
+    """Store several secrets in one durable, verified transaction."""
+    if not values:
+        return
+    with _STORE_LOCK:
+        original_store = _read_store(strict=True)
+        candidates = {}
+        for key, value in values.items():
+            entry = _encode_entry(value)
+            # Verify DPAPI/plain encoding before replacing the last known-good
+            # file. This protects the old credential if Windows returns a
+            # malformed ciphertext despite reporting encryption success.
+            sentinel = object()
+            if _decode_entry(entry, sentinel) != (value or ""):
+                raise SecretStorageError(
+                    "Windows could not verify the encrypted password. The "
+                    "previous password was not changed."
+                )
+            candidates[key] = entry
+
+        updated_store = dict(original_store)
+        updated_store.update(candidates)
+        _write_store(updated_store)
+
+        try:
+            verified = _read_store(strict=True)
+            for key, value in values.items():
+                entry = verified.get(key)
+                if (not isinstance(entry, dict)
+                        or _decode_entry(entry, None) != (value or "")):
+                    raise SecretStorageError(
+                        "Password verification failed after writing the "
+                        "credential store."
+                    )
+        except SecretStorageError:
+            # Best-effort rollback to the in-memory last-known-good store. If
+            # the disk remains unwritable, _write_store raises the more useful
+            # storage error instead of claiming that the old value survived.
+            _write_store(original_store)
+            raise
+
+
+def set_secret(key: str, value: str) -> None:
+    """Store a secret. On Windows it's DPAPI-encrypted with the user's
+    login credentials. On other platforms it falls back to base64
+    (NOT secure — but the app should only be deployed on Windows)."""
+    set_secrets({key: value})
+
+
+def get_secret(key: str, default: str="") -> str:
+    """Retrieve a secret. Returns default if missing or decryption fails."""
+    with _STORE_LOCK:
+        store = _read_store()
+        entry = store.get(key)
+        if not isinstance(entry, dict):
+            return default
+        return _decode_entry(entry, default)
+
+
+def delete_secret(key: str) -> bool:
+    """Best-effort removal; never clobber an unreadable credential store."""
+    try:
+        with _STORE_LOCK:
+            store = _read_store(strict=True)
+            if key not in store:
+                return True
+            del store[key]
+            _write_store(store)
+            return True
+    except SecretStorageError:
+        return False
+
+
+def backup_and_reset_store() -> StoreRecoveryResult:
+    """Move an unreadable store aside and create a new empty one.
+
+    This is intentionally explicit and is only called after user confirmation.
+    The old DPAPI ciphertext remains available for diagnosis/recovery instead
+    of being deleted or overwritten.
+    """
+    global SECRETS_FILE
+    with _STORE_LOCK:
+        original_path = SECRETS_FILE
+        backup_path = None
+        moved_to_backup = False
+        if SECRETS_FILE.exists():
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            backup_path = SECRETS_FILE.with_name(
+                f"{SECRETS_FILE.name}.unreadable-{stamp}.bak"
+            )
+            try:
+                os.replace(SECRETS_FILE, backup_path)
+                moved_to_backup = True
+            except OSError:
+                # The old releases could leave an ACL that denies even rename.
+                # Preserve that locked file in place and switch to a fresh,
+                # user-writable LocalAppData credential store instead.
+                backup_path = original_path
+                candidate = RECOVERY_SECRETS_FILE
+                if candidate.exists() or candidate == original_path:
+                    candidate = candidate.with_name(
+                        f"secrets-recovered-{stamp}.dat"
+                    )
+                SECRETS_FILE = candidate
+        try:
+            _write_store({})
+        except Exception:
+            failed_active_path = SECRETS_FILE
+            SECRETS_FILE = original_path
+            if (moved_to_backup and backup_path and backup_path.exists()
+                    and not original_path.exists()):
+                try:
+                    os.replace(backup_path, original_path)
+                except OSError:
+                    pass
+            raise SecretStorageError(
+                f"Could not create a new credential store at "
+                f"{failed_active_path}."
+            )
+        return StoreRecoveryResult(
+            preserved_path=backup_path,
+            active_path=SECRETS_FILE,
+            moved_to_backup=moved_to_backup,
+        )
 
 
 def migrate_from_config(key: str) -> bool:

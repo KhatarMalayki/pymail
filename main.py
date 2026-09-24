@@ -5,7 +5,7 @@ Entry point.
 import sys
 from pathlib import Path
 from PyQt5.QtWidgets import QApplication, QMessageBox, QDialog
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
 from core import license as licmod
 from core.single_instance import SingleInstance
@@ -27,6 +27,14 @@ def main():
     apply_theme(app)
 
     _set_app_icon(app)
+
+    # Release builds use this isolated mode to prove that the frozen EXE can
+    # bootstrap and run its Qt event loop. It deliberately bypasses the
+    # single-instance lock, license dialogs, and user database so smoke tests
+    # remain valid while the installed RunLab Mail is already open.
+    if "--smoke-test" in sys.argv:
+        QTimer.singleShot(10_000, app.quit)
+        sys.exit(app.exec_())
 
     ensure_safe_install_location(app)
 

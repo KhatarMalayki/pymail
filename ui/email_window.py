@@ -27,6 +27,7 @@ class EmailWindow(QMainWindow):
             | Qt.WindowMaximizeButtonHint
             | Qt.WindowCloseButtonHint
         )
+        self.setAttribute(Qt.WA_DeleteOnClose, False)
 
         self.setMinimumSize(720, 520)
         self.resize(960, 720)

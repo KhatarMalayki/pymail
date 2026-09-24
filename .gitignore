@@ -1,13 +1,10 @@
 # Python
-__pycache__/
-*.pyc
-*.pyo
-*.spec
 build/
 dist/
 *.egg-info/
 .venv/
 venv/
+*.spec
 
 # Environment / config (may contain secrets or local paths)
 .env
@@ -23,11 +20,24 @@ admin/licenses_issued.json
 # Smoke / debug helpers (often have admin tokens hardcoded)
 smoke_*.py
 test_*.py
+!tests/
+!tests/**
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+tests/**/__pycache__/
+tests/**/*.pyc
 
 # Ad-hoc diagnostic / scratch scripts (local-only experiments)
 _diag_*.py
 _t_*.py
 test[0-9]*.py
+
+# Graphify local cache and snapshots
+graphify-out/cache/
+graphify-out/202*/
 
 # Worker development artifacts
 worker/node_modules/

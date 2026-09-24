@@ -236,8 +236,13 @@ def admin_delete(token: str, license_id: str) -> dict:
 
 
 def admin_push_version(token: str, version: str) -> dict:
-    """Set allowed_version on all user records. Users only auto-update
-    to versions that have been pushed by the admin."""
+    """Set allowed_version on all non-admin user records.
+
+    OWNER-ONLY BULK ROLLOUT: publishing a release does not authorize calling
+    this function. Automation and coding agents must not invoke it unless the
+    project owner explicitly instructs them to push that exact version to all
+    users. The project owner normally performs this manual action themselves.
+    """
     return _post(
         "/admin/push-version",
         {"version": version},
@@ -256,11 +261,12 @@ def admin_push_version_single(token: str, license_id: str, version: str) -> dict
 
 def admin_rebind(token: str, license_id: str, machine_id: str, *,
                  hostname: str = "", os_user: str = "") -> dict:
-    """Move an existing license to a new device (new machine_id_hash).
+    """Move an existing license to a device, or make it floating.
 
-    The Worker re-signs the license bound to the new machine and returns a
-    fresh license_key the user pastes via 'Enter / replace license key'.
-    license_id, expiry, and revocation history are preserved.
+    An empty machine_id intentionally means floating (usable on any device).
+    The Worker re-signs the license and returns a fresh license_key the user
+    pastes via 'Enter / replace license key'. License ID, expiry, and
+    revocation history are preserved.
     """
     return _post(
         "/admin/rebind",
@@ -301,4 +307,3 @@ def admin_generate(token: str, email: str, name: str = "", *,
         },
         headers=admin_headers(token),
     )
-

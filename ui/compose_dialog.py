@@ -1323,20 +1323,11 @@ class ComposeDialog(QDialog):
         self.status_label.setText("")
 
     def _split_addrs(self, value: str):
-        # Be liberal in what we accept so users coming from Outlook/other
-        # clients don't get tripped up. Recipients may be separated by commas
-        # OR semicolons (Outlook uses ';'), and individual addresses are often
-        # wrapped in single/double quotes (e.g. 'khatar@tunasgroup.com';).
-        # We split on both separators, then strip surrounding quotes and
-        # whitespace from each piece.
-        import re
-        parts = re.split(r"[,;]+", value or "")
-        out = []
-        for raw in parts:
-            a = raw.strip().strip("'\"").strip()
-            if a:
-                out.append(a)
-        return out
+        # Parse RFC mailboxes so quoted display names containing commas stay
+        # intact. The helper also accepts Outlook-style semicolon separators.
+        from core.recipient_utils import format_recipient, parse_recipients
+        return [format_recipient(name, address)
+                for name, address in parse_recipients(value)]
 
     def _send(self):
         if not self.accounts:
@@ -1344,12 +1335,15 @@ class ComposeDialog(QDialog):
         account_id = self.account_combo.currentData()
         account = database.get_account(account_id)
 
-        to_list = self._split_addrs(self.to_edit.text())
-        if not to_list:
-            QMessageBox.warning(self, "Missing", "Please specify at least one recipient.")
-            return
-        cc_list = self._split_addrs(self.cc_edit.text())
-        bcc_list = self._split_addrs(self.bcc_edit.text())
+        # Queue-first: preserve exactly what the user sees in recipient
+        # fields. Even an invalid/empty To must reach Outbox so Send/Receive
+        # can report the failure and the user can reopen and correct it.
+        to_text = self.to_edit.text().strip()
+        cc_text = self.cc_edit.text().strip()
+        bcc_text = self.bcc_edit.text().strip()
+        to_list = self._split_addrs(to_text)
+        cc_list = self._split_addrs(cc_text)
+        bcc_list = self._split_addrs(bcc_text)
 
         subject = self.subject_edit.text().strip() or "(no subject)"
         body_plain = self.body_edit.toPlainText()
@@ -1387,9 +1381,9 @@ class ComposeDialog(QDialog):
                 account_id,
                 {
                     "from": from_addr,
-                    "to": ", ".join(to_list),
-                    "cc": ", ".join(cc_list),
-                    "bcc": ", ".join(bcc_list),
+                    "to": to_text,
+                    "cc": cc_text,
+                    "bcc": bcc_text,
                     "subject": subject,
                     "body": body_plain,
                 },
@@ -1436,7 +1430,7 @@ class ComposeDialog(QDialog):
             from core.mail_parser import parse_message
             try:
                 parsed, atts = parse_message(raw_bytes)
-                database.insert_email(account["id"], "sent", parsed, atts)
+                database.insert_email(account["id"], "sent", parsed, atts, raw_bytes)
             except Exception:
                 pass
         self._sent = True
@@ -1476,6 +1470,7 @@ class ComposeDialog(QDialog):
             or self.bcc_edit.text().strip()
             or self.subject_edit.text().strip()
             or self.body_edit.toPlainText().strip()
+            or self._body_has_rich_content()
         )
 
     def _collect_fields(self) -> dict:

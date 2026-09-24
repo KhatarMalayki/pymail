@@ -46,6 +46,7 @@ APP_DIR = Path(os.path.expanduser("~")) / ".pymail"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 LICENSE_FILE = APP_DIR / "license.json"
 BLACKLIST_CACHE_FILE = APP_DIR / "blacklist_cache.json"
+MACHINE_ID_FILE = APP_DIR / "machine_id"
 
 # Name shown in user-facing license error messages
 ADMIN_NAME = "Khatar"
@@ -64,12 +65,39 @@ DEFAULT_BLACKLIST_URL = (
 
 # ---------- Machine ID ----------
 
-def get_machine_id() -> str:
-    """Stable, hashed machine identifier.
+def _hash_machine_identity(raw: str) -> str:
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
-    Uses Windows MachineGuid from the registry on Windows, falls back to
-    hostname + MAC. Hashed so it's not personally identifiable.
-    """
+
+def _read_cached_machine_id() -> str:
+    try:
+        value = MACHINE_ID_FILE.read_text(encoding="ascii").strip().lower()
+        if len(value) == 32 and all(c in "0123456789abcdef" for c in value):
+            return value
+    except Exception:
+        pass
+    return ""
+
+
+def _remember_machine_id(machine_id: str) -> None:
+    """Persist the chosen ID so transient hardware/registry changes cannot
+    silently turn the same Windows installation into a different device."""
+    value = (machine_id or "").strip().lower()
+    if len(value) != 32 or not all(c in "0123456789abcdef" for c in value):
+        return
+    try:
+        MACHINE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = MACHINE_ID_FILE.with_suffix(".tmp")
+        tmp.write_text(value, encoding="ascii")
+        os.replace(tmp, MACHINE_ID_FILE)
+    except Exception:
+        # A read-only profile must not prevent the app from starting. The
+        # compatibility candidates below still cover the current session.
+        pass
+
+
+def _native_machine_identity() -> str:
+    """Return the strongest OS-owned identity before hashing, if available."""
     raw = ""
     try:
         if sys.platform == "win32":
@@ -89,11 +117,46 @@ def get_machine_id() -> str:
                 raw = mid.read_text().strip()
     except Exception:
         pass
+    return raw
 
-    if not raw:
-        raw = f"{socket.gethostname()}-{uuid.getnode()}-{platform.system()}"
 
-    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+def _legacy_fallback_identity() -> str:
+    """Identity formula used by older releases when MachineGuid was unavailable."""
+    return f"{socket.gethostname()}-{uuid.getnode()}-{platform.system()}"
+
+
+def get_machine_id_candidates() -> tuple[str, ...]:
+    """All IDs that can legitimately represent this installation.
+
+    The legacy fallback remains a validation candidate so a license issued
+    during a transient registry failure keeps working when MachineGuid becomes
+    readable again. The cached value comes first and is the public/stable ID.
+    """
+    values = []
+    cached = _read_cached_machine_id()
+    if cached:
+        values.append(cached)
+
+    native = _native_machine_identity()
+    if native:
+        values.append(_hash_machine_identity(native))
+    values.append(_hash_machine_identity(_legacy_fallback_identity()))
+
+    # Preserve order while removing duplicates.
+    return tuple(dict.fromkeys(v for v in values if v))
+
+
+def get_machine_id() -> str:
+    """Return a stable, persisted, hashed machine identifier."""
+    cached = _read_cached_machine_id()
+    if cached:
+        return cached
+
+    native = _native_machine_identity()
+    raw = native or _legacy_fallback_identity()
+    machine_id = _hash_machine_identity(raw)
+    _remember_machine_id(machine_id)
+    return machine_id
 
 
 # ---------- License signature verification ----------
@@ -241,11 +304,18 @@ def validate_license(
 
     # Machine binding (optional — issuer may issue floating license by
     # leaving machine_id_hash empty)
-    bound_id = (payload.get("machine_id_hash") or "").strip()
-    if bound_id and bound_id != get_machine_id():
-        raise LicenseError(
-            "License terikat ke perangkat lain. Hubungi admin untuk re-issue."
-        )
+    bound_id = (payload.get("machine_id_hash") or "").strip().lower()
+    if bound_id:
+        candidates = get_machine_id_candidates()
+        if bound_id not in candidates:
+            raise LicenseError(
+                "License terikat ke perangkat lain. Hubungi admin untuk re-issue."
+            )
+        # If this key was bound using the legacy fallback, retain that exact ID
+        # from now on. This also makes the Machine ID shown in the UI match the
+        # Worker registry instead of unexpectedly changing after an update.
+        if bound_id != _read_cached_machine_id():
+            _remember_machine_id(bound_id)
 
     # Expiry
     expires = payload.get("expires_at")

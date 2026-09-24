@@ -14,6 +14,25 @@ from PyQt5.QtGui import (
 )
 from core import database
 from .theme import avatar_color_for, initials_of, color as theme_color
+import re
+
+
+def _clean_table_html(html: str) -> str:
+    """Strip rigid widths and nowrap from tables so they wrap and fit the view/page."""
+    if not html:
+        return ""
+    def _clean_table(m):
+        t = m.group(0)
+        t = re.sub(r'\s(width|height|nowrap)(?:\s*=\s*["\']?[^"\'>\s]*["\']?)?', "", t, flags=re.IGNORECASE)
+        sstyle = re.search(r'style\s*=\s*"([^"]*)"', t, re.IGNORECASE)
+        if sstyle:
+            cleaned = re.sub(r'(?:max-)?(?:width|height)\s*:[^;]*;?', "", sstyle.group(1), flags=re.IGNORECASE)
+            cleaned = re.sub(r'white-space\s*:\s*nowrap;?', "", cleaned, flags=re.IGNORECASE)
+            t = t[:sstyle.start(1)] + cleaned + t[sstyle.end(1):]
+        if m.group(1).lower() == "table":
+            t = t[:-1].rstrip() + ' width="100%">'
+        return t
+    return re.sub(r'<(table|td|th)\b[^>]*>', _clean_table, html, flags=re.IGNORECASE)
 
 
 def _make_avatar_pixmap(text: str, size: int = 40) -> QPixmap:
@@ -38,14 +57,11 @@ def _make_avatar_pixmap(text: str, size: int = 40) -> QPixmap:
 class _ImageFetchWorker(QThread):
     """Downloads remote images for an email body off the UI thread.
 
-    Emits `fetched(url, QPixmap)` for each image that loads successfully so
+    Emits `fetched(url, bytes)` for each image that loads successfully so
     the viewer can drop it into the document and re-render. Running this in a
-    background thread keeps the window responsive — the synchronous
-    urllib download used to block the GUI thread and trigger Windows'
-    "Not Responding" state whenever a message contained remote signature
-    logos (or pointed at a slow/unreachable host).
+    background thread keeps the window responsive.
     """
-    fetched = pyqtSignal(str, QPixmap)
+    fetched = pyqtSignal(str, bytes)
 
     def __init__(self, urls: list[str], parent=None):
         super().__init__(parent)
@@ -70,10 +86,8 @@ class _ImageFetchWorker(QThread):
                 continue
             if self._cancelled:
                 return
-            pm = QPixmap()
-            pm.loadFromData(data)
-            if not pm.isNull():
-                self.fetched.emit(url_str, pm)
+            if data:
+                self.fetched.emit(url_str, data)
 
 
 class NetworkAwareTextBrowser(QTextBrowser):
@@ -98,6 +112,7 @@ class NetworkAwareTextBrowser(QTextBrowser):
         self._image_cache: dict[str, QPixmap] = {}
         self._pending: set[str] = set()
         self._worker: _ImageFetchWorker | None = None
+        self._dead_workers: set[_ImageFetchWorker] = set()
         self._current_html: str = ""
         self._block_images: bool = False
         self._blocked_count: int = 0
@@ -105,7 +120,7 @@ class NetworkAwareTextBrowser(QTextBrowser):
         # and the outer scroll area (see EmailView) scrolls header + body as
         # one unit, like Outlook's reading pane.
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.document().documentLayout().documentSizeChanged.connect(
             self._adjust_height
@@ -118,7 +133,10 @@ class NetworkAwareTextBrowser(QTextBrowser):
         doc.setTextWidth(self.viewport().width())
         h = int(doc.size().height())
         # Account for the content margins/frame so the last line isn't clipped.
-        self.setFixedHeight(h + 12)
+        extra = 12
+        if doc.idealWidth() > self.viewport().width():
+            extra += self.horizontalScrollBar().sizeHint().height()
+        self.setFixedHeight(h + extra)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -190,7 +208,7 @@ class NetworkAwareTextBrowser(QTextBrowser):
         return super().loadResource(rtype, url)
 
     def _start_worker(self, urls: list[str]) -> None:
-        self._worker = _ImageFetchWorker(urls, self)
+        self._worker = _ImageFetchWorker(urls, None)  # No parent! Otherwise closing the window destroys the thread while running.
         self._worker.fetched.connect(self._on_image_fetched)
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
@@ -204,14 +222,19 @@ class NetworkAwareTextBrowser(QTextBrowser):
                 w.finished.disconnect(self._on_worker_finished)
             except (TypeError, RuntimeError):
                 pass
-            # Let the cancelled thread delete itself once it unwinds (it
-            # checks the cancel flag between downloads) so workers don't pile
-            # up when the user clicks through messages quickly.
+            # Keep a python reference until the thread actually finishes
+            # so it isn't garbage collected while running (which crashes PyQt).
+            self._dead_workers.add(w)
+            w.finished.connect(lambda w=w: self._dead_workers.discard(w))
             w.finished.connect(w.deleteLater)
             self._worker = None
 
-    def _on_image_fetched(self, url_str: str, pm: QPixmap) -> None:
-        from PyQt5.QtGui import QTextDocument
+    def _on_image_fetched(self, url_str: str, data: bytes) -> None:
+        from PyQt5.QtGui import QTextDocument, QPixmap
+        pm = QPixmap()
+        pm.loadFromData(data)
+        if pm.isNull():
+            return
         # Cache the image and register it with the document.
         self._image_cache[url_str] = pm
         self._pending.discard(url_str)
@@ -382,6 +405,7 @@ class _PrintPreviewDialog(QDialog):
         lands on one page (reserving room for the header on page 1); the
         percent modes let the user shrink images manually."""
         import re
+        import html as html_lib
         page_w, page_h = self._printable_size_px()
         mode = (self.imgsize_combo.currentText()
                 if hasattr(self, "imgsize_combo") else "Fit to page")
@@ -402,23 +426,47 @@ class _PrintPreviewDialog(QDialog):
 
         def _fix(m):
             tag = m.group(0)
+            # Capture original width BEFORE stripping so signature icons
+            # (which set small explicit widths like 23px) keep their size
+            # instead of blowing up to the natural-pixel size in print.
+            orig_w_m = re.search(r'\swidth\s*=\s*["\']?(\d+)', tag, re.IGNORECASE)
+            orig_w = int(orig_w_m.group(1)) if orig_w_m else None
             sm = re.search(r'src\s*=\s*["\']([^"\']+)["\']', tag, re.IGNORECASE)
             src = sm.group(1) if sm else ""
-            nat = size_map.get(src)
+            src_unescaped = html_lib.unescape(src)
+            nat = size_map.get(src_unescaped) or size_map.get(src)
             # Strip existing width/height attrs and any width/height in style.
-            tag = re.sub(r'\s(width|height)\s*=\s*"[^"]*"', "", tag, flags=re.IGNORECASE)
-            tag = re.sub(r"\s(width|height)\s*=\s*'[^']*'", "", tag, flags=re.IGNORECASE)
+            tag = re.sub(r'\s(width|height)\s*=\s*["\']?[^"\'>\s]+["\']?', "", tag, flags=re.IGNORECASE)
             tw = th = None
+            nw = nh = 0
             if nat and nat[0] > 0 and nat[1] > 0:
                 nw, nh = nat
-                if manual_pct is not None:
-                    # Manual percent, but never wider than the page.
-                    scale = min(manual_pct, page_w / nw)
+                # Images WITHOUT an explicit width= attr are signature/brand
+                # elements (logos, social icons, WA/phone banners). They look
+                # small in the email body but have huge natural pixel sizes
+                # in size_map, which made them blow up to 40% page width in
+                # print. Cap them at 48px (matches their on-screen size);
+                # images that need full width use the explicit width attr.
+                if orig_w is None:
+                    max_w = 48.0
+                elif manual_pct is not None:
+                    max_w = page_w * manual_pct
                 else:
-                    # Fit to page: cap by width AND (page height - header).
-                    scale = min(1.0, page_w / nw, fit_h / nh)
+                    # Content images with explicit width: respect up to 40%
+                    # page width so banners don't dominate.
+                    max_w = page_w * 0.40
+                scale = min(1.0, max_w / nw, fit_h / nh)
                 tw = max(1, int(nw * scale))
                 th = max(1, int(nh * scale))
+            # Prefer the original width if it's smaller than what we'd compute
+            # (signature icons set width="23" etc. — keeping that stops the
+            # 512px+ social icons from printing huge).
+            if orig_w is not None and (tw is None or orig_w < tw):
+                tw = orig_w
+                if nw > 0:
+                    th = max(1, int(orig_w / nw * nh))
+                else:
+                    th = orig_w
             # Remove any width/height already in the style attribute.
             sstyle = re.search(r'style\s*=\s*"([^"]*)"', tag, re.IGNORECASE)
             if sstyle:
@@ -434,7 +482,22 @@ class _PrintPreviewDialog(QDialog):
                 tag = tag[:-1].rstrip() + f' width="{tw}" height="{th}">'
             return tag
 
-        return re.sub(r'<img\b[^>]*>', _fix, self._body_html, flags=re.IGNORECASE)
+        def _cap_untagged(m):
+            """Cap any <img> without explicit width to a sensible small size
+            (signature icons: Instagram/Facebook/YouTube glyphs etc.).
+            25% of page width was way too big (~330px) and made social
+            icons dominate the printed signature. 48px matches what they
+            look like in the email body view."""
+            tag = m.group(0)
+            if 'width=' not in tag.lower():
+                return tag[:-1] + ' width="48" height="48">'
+            return tag
+
+        body = re.sub(r'<img\b[^>]*>', _fix, self._body_html, flags=re.IGNORECASE)
+        # Images NOT sized by _fix (no entry in size_map) are likely signature
+        # icons — cap them to 25% page width so they don't blow up.
+        body = re.sub(r'<img\b[^>]*>', _cap_untagged, body, flags=re.IGNORECASE)
+        return _clean_table_html(body)
 
     def _rebuild_document(self):
         from PyQt5.QtCore import QSizeF
@@ -650,8 +713,10 @@ class EmailView(QWidget):
         self.reply_all_btn = QPushButton("↩↩  Reply All")
         self.forward_btn = QPushButton("➡  Forward")
         self.print_btn = QPushButton("🖨  Print")
+        self.export_btn = QPushButton("💾  Save as .eml")
+        self.export_btn.setToolTip("Export this email as .eml evidence")
         for b in (self.reply_btn, self.reply_all_btn, self.forward_btn,
-                  self.print_btn):
+                  self.print_btn, self.export_btn):
             b.setCursor(Qt.PointingHandCursor)
             btn_row.addWidget(b)
         btn_row.addStretch(1)
@@ -659,6 +724,7 @@ class EmailView(QWidget):
         self.reply_all_btn.clicked.connect(lambda: self.reply_requested.emit(self.email, "reply_all"))
         self.forward_btn.clicked.connect(lambda: self.reply_requested.emit(self.email, "forward"))
         self.print_btn.clicked.connect(self._print_email)
+        self.export_btn.clicked.connect(self._export_eml)
         h_layout.addLayout(btn_row)
 
         # Attachments (below header, outside scroll)
@@ -723,7 +789,7 @@ class EmailView(QWidget):
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scroll.setStyleSheet(
             f"QScrollArea {{ border: none; background: {theme_color('bg')}; }}"
         )
@@ -791,7 +857,7 @@ class EmailView(QWidget):
         self.img_banner.setVisible(False)
         self.body_view.setHtml("")
         for b in (self.reply_btn, self.reply_all_btn, self.forward_btn,
-                  self.print_btn):
+                  self.print_btn, self.export_btn):
             b.setEnabled(False)
 
     def show_email(self, email_id: int):
@@ -829,7 +895,7 @@ class EmailView(QWidget):
             self.cc_label.setVisible(False)
 
         for b in (self.reply_btn, self.reply_all_btn, self.forward_btn,
-                  self.print_btn):
+                  self.print_btn, self.export_btn):
             b.setEnabled(True)
 
         # Attachments
@@ -878,6 +944,7 @@ class EmailView(QWidget):
             except Exception:
                 html = None  # fall back to stored plain text
         if html:
+            html = _clean_table_html(html)
             self.body_view.setHtml(html)
         else:
             safe = (plain
@@ -915,6 +982,7 @@ class EmailView(QWidget):
         scale/percent has nothing to apply."""
         import re
         import base64
+        import html as html_lib
         from PyQt5.QtCore import QUrl, QByteArray, QBuffer
         from PyQt5.QtGui import QTextDocument, QImage, QPixmap
         out = {}
@@ -925,7 +993,8 @@ class EmailView(QWidget):
         for m in re.finditer(r'<img\b[^>]*\bsrc\s*=\s*["\']([^"\']+)["\']',
                              html, flags=re.IGNORECASE):
             src = m.group(1)
-            if src in out:
+            src_unescaped = html_lib.unescape(src)
+            if src in out or src_unescaped in out:
                 continue
             w = h = 0
             try:
@@ -941,8 +1010,12 @@ class EmailView(QWidget):
                         w, h = img.width(), img.height()
                 else:
                     res = None
-                    if src in cache:
+                    if src_unescaped in cache:
+                        res = cache[src_unescaped]
+                    elif src in cache:
                         res = cache[src]
+                    if res is None:
+                        res = doc.resource(QTextDocument.ImageResource, QUrl(src_unescaped))
                     if res is None:
                         res = doc.resource(QTextDocument.ImageResource, QUrl(src))
                     img = None
@@ -955,8 +1028,30 @@ class EmailView(QWidget):
             except Exception:
                 w = h = 0
             if w > 0 and h > 0:
+                out[src_unescaped] = (w, h)
                 out[src] = (w, h)
         return out
+
+    def _export_eml(self):
+        if not self.email or not self.email.get("id"):
+            return
+        from core.email_export import export_emails, get_last_export_dir
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose folder for email evidence", get_last_export_dir()
+        )
+        if not folder:
+            return
+        try:
+            files = export_emails([self.email["id"]], folder)
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        if files:
+            QMessageBox.information(
+                self, "Email evidence exported",
+                f"Saved to:
+{files[0]}"
+            )
 
     def _print_email(self):
         """Open the system print dialog (with preview) for the current email.

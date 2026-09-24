@@ -288,14 +288,27 @@ class AccountDialog(QDialog):
         sig_toolbar.addSpacing(8)
 
         # Template inserter
-        tpl_btn = QPushButton("Use Tunas template")
+        tpl_btn = QPushButton("Use Tunas Rent")
         tpl_btn.setStyleSheet("QPushButton { padding:4px 10px; }")
         tpl_btn.setToolTip(
             "Insert a Tunas Group corporate signature with your name, role, "
             "and phone. Replaces current signature content."
         )
-        tpl_btn.clicked.connect(self._insert_tunas_template)
+        tpl_btn.clicked.connect(
+            lambda: self._insert_tunas_template("tunas")
+        )
         sig_toolbar.addWidget(tpl_btn)
+
+        logistic_tpl_btn = QPushButton("Use Tunas Logistic")
+        logistic_tpl_btn.setStyleSheet("QPushButton { padding:4px 10px; }")
+        logistic_tpl_btn.setToolTip(
+            "Insert the Tunas Logistic / PT Mitra Ananta Megah corporate "
+            "signature. Replaces current signature content."
+        )
+        logistic_tpl_btn.clicked.connect(
+            lambda: self._insert_tunas_template("tunas_logistic")
+        )
+        sig_toolbar.addWidget(logistic_tpl_btn)
 
         sig_toolbar.addStretch(1)
         # Status (paste image download progress)
@@ -396,9 +409,13 @@ class AccountDialog(QDialog):
         else:
             self.signature_edit.setPlainText(sig)
         # Auto-detect "same as POP3" state by comparing user/pass
-        same = (
-            (a.get("smtp_user") or "") == (a.get("pop3_user") or "")
-            and (a.get("smtp_password") or "") == (a.get("pop3_password") or "")
+        pop_password = a.get("pop3_password") or ""
+        smtp_password = a.get("smtp_password") or ""
+        same = bool(
+            pop_password
+            and smtp_password
+            and (a.get("smtp_user") or "") == (a.get("pop3_user") or "")
+            and smtp_password == pop_password
         )
         if same:
             self.same_as_pop.setChecked(True)
@@ -499,9 +516,8 @@ class AccountDialog(QDialog):
         plain = cursor.selection().toPlainText()
         self.signature_edit.setPlainText(plain)
 
-    def _insert_tunas_template(self):
-        """Insert the Tunas Group corporate signature template via a single
-        form dialog (name, email, role, phone, address)."""
+    def _insert_tunas_template(self, template_key="tunas"):
+        """Insert a Tunas signature through one reusable details form."""
         if self.signature_edit.toPlainText().strip():
             ret = QMessageBox.question(
                 self, "Replace existing signature?",
@@ -514,17 +530,23 @@ class AccountDialog(QDialog):
                 return
 
         from .template_form_dialog import TunasTemplateForm
+        is_logistic = template_key == "tunas_logistic"
         form = TunasTemplateForm(
             self,
             default_name=self.name_edit.text().strip(),
             default_email=self.email_edit.text().strip(),
+            default_role=("Finance & Billing Staff" if is_logistic
+                          else "IT Operational"),
+            template_label=("Tunas Logistic" if is_logistic
+                            else "Tunas Rent"),
         )
         if form.exec_() != QDialog.Accepted or not form.result_data:
             return
 
         d = form.result_data
-        from core.sig_templates import render_tunas
-        html = render_tunas(
+        from core.sig_templates import render_tunas, render_tunas_logistic
+        renderer = render_tunas_logistic if is_logistic else render_tunas
+        html = renderer(
             name=d["name"],
             role=d["role"],
             phone=d["phone"],
@@ -553,7 +575,7 @@ class AccountDialog(QDialog):
                     f"This usually means a firewall/proxy is blocking image "
                     f"downloads, or you're offline. The remaining images will "
                     f"be retried automatically when you send. To embed them "
-                    f"now, click 'Use Tunas template' again while online.",
+                    f"now, insert the template again while online.",
                 )
             elif downloaded:
                 QMessageBox.information(
@@ -647,8 +669,72 @@ class AccountDialog(QDialog):
         if not self._validate():
             return
         data = self._collect()
-        if self.account:
-            database.update_account(self.account["id"], data)
-        else:
-            database.add_account(data)
+
+        def persist():
+            if self.account:
+                database.update_account(self.account["id"], data)
+            else:
+                database.add_account(data)
+
+        try:
+            persist()
+        except Exception as exc:
+            from core import secure_storage
+            SecretStorageError = secure_storage.SecretStorageError
+            if not isinstance(exc, SecretStorageError):
+                raise
+            if exc.can_reset_store:
+                answer = QMessageBox.question(
+                    self,
+                    "Credential storage needs repair",
+                    "The existing password store cannot be read. RunLab Mail "
+                    "can move it to an encrypted backup and create a new "
+                    "credential store.\n\n"
+                    "You will need to re-enter passwords for any other mail "
+                    "accounts. The old file will not be deleted.\n\n"
+                    "Back up the old store, reset it, and save this password?",
+                    QMessageBox.Yes | QMessageBox.Cancel,
+                    QMessageBox.Cancel,
+                )
+                if answer != QMessageBox.Yes:
+                    return
+                try:
+                    recovery = secure_storage.backup_and_reset_store()
+                    persist()
+                except SecretStorageError as retry_exc:
+                    QMessageBox.critical(
+                        self,
+                        "Credential storage repair failed",
+                        f"RunLab Mail could not repair the password store.\n\n"
+                        f"{retry_exc}",
+                    )
+                    return
+                preserved_text = (
+                    str(recovery.preserved_path)
+                    if recovery.preserved_path else "(none)"
+                )
+                recovery_note = (
+                    "The unreadable store was moved to a backup."
+                    if recovery.moved_to_backup else
+                    "Windows kept the locked old store in place."
+                )
+                QMessageBox.information(
+                    self,
+                    "Password saved",
+                    "The credential store was reset and this account password "
+                    f"was saved.\n\n{recovery_note}\n"
+                    f"Old store preserved at:\n{preserved_text}\n\n"
+                    f"New active store:\n{recovery.active_path}",
+                )
+                self.accept()
+                return
+            QMessageBox.critical(
+                self,
+                "Password was not saved",
+                "RunLab Mail could not store the account password securely."
+                f"\n\n{exc}\n\n"
+                "Your previous password was not removed. Check folder "
+                "permissions or Windows profile access, then try Save again.",
+            )
+            return
         self.accept()

@@ -333,7 +333,15 @@ class LicenseManagerDialog(QDialog):
         )
         if ok and token.strip():
             self._token = token.strip()
-            secure_storage.set_secret("admin_token", self._token)
+            try:
+                secure_storage.set_secret("admin_token", self._token)
+            except secure_storage.SecretStorageError as exc:
+                QMessageBox.critical(
+                    self,
+                    "Token was not saved",
+                    f"The admin token could not be stored securely.\n\n{exc}",
+                )
+                return
             self.status_label.setText("Token saved (encrypted). Loading users...")
             self._load()
         elif not self._token:

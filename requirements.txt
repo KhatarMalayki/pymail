@@ -2,3 +2,4 @@ PyQt5==5.15.10
 cryptography>=41.0
 pyinstaller>=6.0
 pywin32>=306  ; sys_platform == "win32"
+tnefparse==1.4.0

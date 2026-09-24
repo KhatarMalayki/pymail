@@ -16,6 +16,12 @@ What this does:
     5. Uploads PyMail-{version}.zip and update_manifest.json to R2
     6. Existing RunLab Mail installs auto-detect the new version on next launch
 
+Release/rollout ownership policy:
+    Publishing a release and changing users' allowed_version are separate actions.
+    This script must never call admin_push_version or /admin/push-version.
+    Bulk rollout to all users is reserved for the project owner and must only
+    happen through their own manual action, never as an automatic release step.
+
 Configuration:
     R2_BUCKET and R2_PUBLIC_URL are read from .env (or defaults below).
 """
@@ -93,7 +99,7 @@ def _smoke_test_exe(exe_path: Path, seconds: int=4) -> None:
     If the process exits immediately, release is aborted.
     """
     print(f">>> Smoke testing {exe_path.name} for {seconds}s...")
-    proc = subprocess.Popen([str(exe_path)])
+    proc = subprocess.Popen([str(exe_path), "--smoke-test"])
     try:
         time.sleep(seconds)
         code = proc.poll()
@@ -249,6 +255,8 @@ def main():
             "--hidden-import", "pywintypes",
             "--hidden-import", "mailbox",
             "--hidden-import", "PyQt5.QtPrintSupport",
+            "--hidden-import", "tnefparse",
+            "--copy-metadata", "tnefparse",
             "main.py",
         ]
         icon = ROOT / "resources" / "pymail.ico"
@@ -295,7 +303,7 @@ def main():
     # ---- Keep R2 storage bounded: retain only the last KEEP_RELEASES zips ----
     # Each release is ~45 MB; on a free 10 GB plan they pile up fast. We track
     # what we've published in a local ledger and delete anything older than the
-    # newest KEEP_RELEASES. (The R2 lifecycle rule is a slower 14-day backstop.)
+    # newest KEEP_RELEASES. (The R2 lifecycle rule is a slower 90-day backstop.)
     try:
         _prune_old_releases(version)
     except Exception as e:

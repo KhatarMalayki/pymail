@@ -2,10 +2,20 @@
 MIME message parsing helpers.
 """
 import email
+import mimetypes
+import os
 from email import policy
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
+
+_TNEF_MIME_TYPES = {
+    "application/ms-tnef",
+    "application/vnd.ms-tnef",
+}
+_TNEF_FILENAMES = {"winmail.dat", "win.dat"}
+_MAX_TNEF_ATTACHMENTS = 100
+_MAX_TNEF_EXTRACTED_BYTES = 100 * 1024 * 1024
 
 
 def _decode_header(value):
@@ -15,6 +25,63 @@ def _decode_header(value):
         return str(make_header(decode_header(value)))
     except Exception:
         return str(value)
+
+
+def _is_tnef_attachment(filename: str | None, mime_type: str) -> bool:
+    """Return True for Microsoft TNEF containers such as winmail.dat."""
+    safe_name = os.path.basename((filename or "").replace("\\", "/")).lower()
+    return (
+        (mime_type or "").lower() in _TNEF_MIME_TYPES
+        or safe_name in _TNEF_FILENAMES
+    )
+
+
+def _safe_attachment_name(value: str | None, index: int) -> str:
+    """Discard paths/control characters supplied by an embedded attachment."""
+    name = os.path.basename(str(value or "").replace("\\", "/")).strip()
+    name = "".join(ch for ch in name if ch >= " " and ch != "\x7f")
+    return name or f"tnef-attachment-{index}.bin"
+
+
+def _extract_tnef_attachments(data: bytes) -> list[dict]:
+    """Decode attachments encapsulated in a Microsoft TNEF payload.
+
+    Any import/parsing/limit failure returns an empty list. The caller then
+    retains the original winmail.dat, so malformed or unsupported messages
+    never cause user data to disappear.
+    """
+    if not data:
+        return []
+    try:
+        from tnefparse import TNEF
+
+        decoded = TNEF(data)
+    except Exception:
+        return []
+
+    extracted = []
+    total_size = 0
+    for index, item in enumerate(decoded.attachments[:_MAX_TNEF_ATTACHMENTS], 1):
+        try:
+            payload = bytes(item.data or b"")
+            filename = _safe_attachment_name(
+                item.long_filename() or item.name, index
+            )
+        except Exception:
+            continue
+        total_size += len(payload)
+        if total_size > _MAX_TNEF_EXTRACTED_BYTES:
+            return []
+        mime_type = (
+            mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        )
+        extracted.append({
+            "filename": filename,
+            "mime_type": mime_type,
+            "size": len(payload),
+            "data": payload,
+        })
+    return extracted
 
 
 def parse_message(raw_bytes: bytes, uidl: str = None) -> dict:
@@ -111,12 +178,26 @@ def parse_message(raw_bytes: bytes, uidl: str = None) -> dict:
                     data = part.get_payload(decode=True) or b""
                 except Exception:
                     data = b""
-                attachments.append({
-                    "filename": filename or "attachment.bin",
-                    "mime_type": ctype,
-                    "size": len(data),
-                    "data": data,
-                })
+                if _is_tnef_attachment(filename, ctype):
+                    decoded_attachments = _extract_tnef_attachments(data)
+                    if decoded_attachments:
+                        # Outlook hides the TNEF wrapper and shows its contents.
+                        # Match that behavior only after successful extraction.
+                        attachments.extend(decoded_attachments)
+                    else:
+                        attachments.append({
+                            "filename": filename or "winmail.dat",
+                            "mime_type": ctype,
+                            "size": len(data),
+                            "data": data,
+                        })
+                else:
+                    attachments.append({
+                        "filename": filename or "attachment.bin",
+                        "mime_type": ctype,
+                        "size": len(data),
+                        "data": data,
+                    })
             elif ctype == "text/plain":
                 try:
                     plain_parts.append(part.get_content())

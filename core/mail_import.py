@@ -117,7 +117,7 @@ def _store_raw_email(account_id: int, folder: str, raw: bytes,
     if database.email_exists(account_id, folder, uidl):
         return False
     try:
-        database.insert_email(account_id, folder, parsed, attachments)
+        database.insert_email(account_id, folder, parsed, attachments, raw)
         return True
     except Exception:
         return False

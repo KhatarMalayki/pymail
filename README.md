@@ -1,6 +1,6 @@
 # RunLab Mail
 
-Desktop email client (POP3 + SMTP) for internal Tunas Group rollout.
+Desktop email client (POP3 + SMTP).
 Built with Python + PyQt5, packaged as a single Windows .exe.
 
 > Codename / repo name: **PyMail**. User-facing display name: **RunLab Mail**.
